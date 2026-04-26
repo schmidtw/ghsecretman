@@ -17,6 +17,7 @@ import (
 	"github.com/schmidtw/ghsecretman/internal/config"
 	gh "github.com/schmidtw/ghsecretman/internal/github"
 	"github.com/schmidtw/ghsecretman/internal/runner"
+	"github.com/schmidtw/ghsecretman/internal/schema"
 )
 
 // version, commit, and date are set at build time via -ldflags
@@ -56,8 +57,13 @@ func run(args []string, ver string, stdout, stderr io.Writer) int {
 			return runApply(args[2:], stdout, stderr)
 		case "enforce":
 			return runEnforce(args[2:], stdout, stderr)
+		case "example":
+			return runExample(args[2:], stdout, stderr)
 		case "version":
 			fmt.Fprintf(stdout, "ghsecretman %s\ncommit %s\nbuilt %s\n", ver, commit, date)
+			return 0
+		case "-h", "--help", "help":
+			printUsage(stdout)
 			return 0
 		}
 	}
@@ -73,8 +79,69 @@ func run(args []string, ver string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	fmt.Fprintln(stderr, "usage: ghsecretman <audit|apply|enforce> --config <path> --org <name> --repo <name>")
+	printUsage(stderr)
 	return 2
+}
+
+// printUsage writes the top-level help text. It is shown for `-h`, `--help`,
+// `help`, and bare invocations.
+func printUsage(w io.Writer) {
+	fmt.Fprint(w, `ghsecretman: manage GitHub Actions secrets, Actions variables, and
+             Dependabot secrets across an organization from a YAML file.
+
+usage:
+  ghsecretman <command> [flags]
+
+commands:
+  audit    Read-only diff between YAML config and live state.
+  apply    Write managed values; never delete.
+  enforce  Apply, then delete unlisted values. Supports --dry-run.
+  example  Print an annotated example YAML config (or write it with -o).
+  version  Print version, commit, and build date.
+
+authentication:
+  Reads GITHUB_TOKEN (preferred) or GH_TOKEN from the environment.
+
+Run 'ghsecretman <command> -h' for command-specific flags.
+See 'ghsecretman example' for the full schema with annotations.
+`)
+}
+
+// runExample prints the embedded annotated example YAML configuration to
+// stdout, or writes it to a file when -o/--output is supplied. Existing files
+// are not overwritten unless -f/--force is set.
+func runExample(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("example", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var output string
+	fs.StringVar(&output, "output", "", "write to file instead of stdout")
+	fs.StringVar(&output, "o", "", "write to file instead of stdout (shorthand)")
+	var force bool
+	fs.BoolVar(&force, "force", false, "overwrite an existing output file")
+	fs.BoolVar(&force, "f", false, "overwrite (shorthand)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	if output == "" {
+		if _, err := io.WriteString(stdout, schema.Example); err != nil {
+			fmt.Fprintf(stderr, "example: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	if !force {
+		if _, err := os.Stat(output); err == nil {
+			fmt.Fprintf(stderr, "example: %s already exists; pass --force to overwrite\n", output)
+			return 2
+		}
+	}
+	if err := os.WriteFile(output, []byte(schema.Example), 0o600); err != nil {
+		fmt.Fprintf(stderr, "example: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func runEnforce(args []string, stdout, stderr io.Writer) int {

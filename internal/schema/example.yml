@@ -27,11 +27,11 @@ github.com:
       # These secrets are not managed by this location and will never be altered.
       ignored:
         vars:
-          - GOO
+          - EXAMPLE_VAR
         secrets:
-          - GOO
+          - EXAMPLE_SECRET
         dependabot:
-          - GOO
+          - EXAMPLE_DEPENDABOT_SECRET
     # variables and secrets to set/audit on a per repo basis.  These will
     # often be unique per repo.
     per-repo:
@@ -51,12 +51,9 @@ github.com:
               env: ENV_VAR_NAME
         # These secrets are not managed by this location and will never be altered.
         ignored:
-          vars:
-            - GOO
-          secrets:
-            - GOO
-          dependabot:
-            - GOO
+          vars: []
+          secrets: []
+          dependabot: []
     # variables and secrets to set/audit for all repos.  This generally will
     # be replace by org level secrets, but this is still valuable to control.
     all-repos:
@@ -71,17 +68,17 @@ github.com:
         vars:
           RPM_GPG_PUBLIC_KEY:
             value:
-            file: ../RPM-GPG-KEY-example
+            file: ./example.file
         secrets:
           PUSH_TAG_TOKEN:
-            value: ghp_secret
+            value: ghp_secret...
             env: ENV_VAR_NAME
-            file: ./RPM-GPG-KEY-example.private
+            file: ./example.secret.file
         dependabot:
           REPO_FETCHING_TOKEN:
-            value: ghp_secret
+            value: ghp_secret...
             env: ENV_VAR_NAME
-            file: ./RPM-GPG-KEY-example.private
+            file: ./example.private.file
       # When something is marked as ignored, it will be ignored for all repos,
       # this allows a simple way to do this without needing to have a per repo
       # entry everywhere.
