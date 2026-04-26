@@ -34,6 +34,30 @@ type Backend interface {
 	DeleteRepoVariable(ctx context.Context, owner, repo, name string) error
 	DeleteRepoSecret(ctx context.Context, owner, repo, name string) error
 	DeleteRepoDependabotSecret(ctx context.Context, owner, repo, name string) error
+
+	// Org-level operations. Org secrets, variables, and Dependabot secrets
+	// are a different GitHub object class from their repo-level counterparts
+	// and use a separate public key for encryption.
+	ListOrgVariables(ctx context.Context, org string) (map[string]string, error)
+	ListOrgSecrets(ctx context.Context, org string) ([]string, error)
+	ListOrgDependabotSecrets(ctx context.Context, org string) ([]string, error)
+
+	GetOrgPublicKey(ctx context.Context, org string) (*PublicKey, error)
+	GetOrgDependabotPublicKey(ctx context.Context, org string) (*PublicKey, error)
+
+	SetOrgVariable(ctx context.Context, org, name, value, visibility string, selectedRepoIDs []int64) error
+	SetOrgSecret(ctx context.Context, org, name string, key *PublicKey, plaintext, visibility string, selectedRepoIDs []int64) error
+	SetOrgDependabotSecret(ctx context.Context, org, name string, key *PublicKey, plaintext, visibility string, selectedRepoIDs []int64) error
+
+	DeleteOrgVariable(ctx context.Context, org, name string) error
+	DeleteOrgSecret(ctx context.Context, org, name string) error
+	DeleteOrgDependabotSecret(ctx context.Context, org, name string) error
+
+	// GetRepoID resolves a repo name to its numeric GitHub ID. Used to
+	// translate `repos:` lists from configuration into the
+	// `selected_repository_ids` payload expected by the org-level secret
+	// and variable APIs.
+	GetRepoID(ctx context.Context, org, repo string) (int64, error)
 }
 
 // Client is the live GitHub backend.
@@ -215,6 +239,171 @@ func (c *Client) DeleteRepoDependabotSecret(ctx context.Context, owner, repo, na
 		return fmt.Errorf("delete repo dependabot secret %s: %w", name, err)
 	}
 	return nil
+}
+
+// ListOrgVariables returns org-level Actions variables as name → value map.
+func (c *Client) ListOrgVariables(ctx context.Context, org string) (map[string]string, error) {
+	vars, _, err := c.gh.Actions.ListOrgVariables(ctx, org, &gogithub.ListOptions{PerPage: 100})
+	if err != nil {
+		return nil, fmt.Errorf("list org variables: %w", err)
+	}
+	out := make(map[string]string, len(vars.Variables))
+	for _, v := range vars.Variables {
+		out[v.Name] = v.Value
+	}
+	return out, nil
+}
+
+// ListOrgSecrets returns the names of org-level Actions secrets.
+func (c *Client) ListOrgSecrets(ctx context.Context, org string) ([]string, error) {
+	secrets, _, err := c.gh.Actions.ListOrgSecrets(ctx, org, &gogithub.ListOptions{PerPage: 100})
+	if err != nil {
+		return nil, fmt.Errorf("list org secrets: %w", err)
+	}
+	return namesOf(secrets), nil
+}
+
+// ListOrgDependabotSecrets returns the names of org-level Dependabot secrets.
+func (c *Client) ListOrgDependabotSecrets(ctx context.Context, org string) ([]string, error) {
+	secrets, _, err := c.gh.Dependabot.ListOrgSecrets(ctx, org, &gogithub.ListOptions{PerPage: 100})
+	if err != nil {
+		return nil, fmt.Errorf("list org dependabot secrets: %w", err)
+	}
+	return namesOf(secrets), nil
+}
+
+// GetOrgPublicKey fetches the public key used to encrypt org Actions secrets.
+func (c *Client) GetOrgPublicKey(ctx context.Context, org string) (*PublicKey, error) {
+	pk, _, err := c.gh.Actions.GetOrgPublicKey(ctx, org)
+	if err != nil {
+		return nil, fmt.Errorf("get org actions public key: %w", err)
+	}
+	return toPublicKey(pk)
+}
+
+// GetOrgDependabotPublicKey fetches the public key used to encrypt org
+// Dependabot secrets.
+func (c *Client) GetOrgDependabotPublicKey(ctx context.Context, org string) (*PublicKey, error) {
+	pk, _, err := c.gh.Dependabot.GetOrgPublicKey(ctx, org)
+	if err != nil {
+		return nil, fmt.Errorf("get org dependabot public key: %w", err)
+	}
+	return toPublicKey(pk)
+}
+
+// SetOrgVariable creates or updates an org Actions variable with the given
+// visibility envelope. selectedRepoIDs must be non-empty when visibility is
+// "selected" and is ignored otherwise.
+func (c *Client) SetOrgVariable(ctx context.Context, org, name, value, visibility string, selectedRepoIDs []int64) error {
+	v := buildOrgVariable(name, value, visibility, selectedRepoIDs)
+	resp, err := c.gh.Actions.UpdateOrgVariable(ctx, org, v)
+	if err == nil {
+		return nil
+	}
+	if resp != nil && resp.StatusCode == 404 {
+		if _, cerr := c.gh.Actions.CreateOrgVariable(ctx, org, v); cerr != nil {
+			return fmt.Errorf("create org variable %s: %w", name, cerr)
+		}
+		return nil
+	}
+	return fmt.Errorf("update org variable %s: %w", name, err)
+}
+
+func buildOrgVariable(name, value, visibility string, selectedRepoIDs []int64) *gogithub.ActionsVariable {
+	v := &gogithub.ActionsVariable{Name: name, Value: value}
+	vis := visibility
+	v.Visibility = &vis
+	if visibility == "selected" {
+		ids := gogithub.SelectedRepoIDs(append([]int64(nil), selectedRepoIDs...))
+		v.SelectedRepositoryIDs = &ids
+	}
+	return v
+}
+
+// SetOrgSecret creates or updates an org Actions secret with the given
+// visibility envelope. plaintext is encrypted client-side with key.
+func (c *Client) SetOrgSecret(ctx context.Context, org, name string, key *PublicKey, plaintext, visibility string, selectedRepoIDs []int64) error {
+	if key == nil {
+		return fmt.Errorf("set org secret %s: missing public key", name)
+	}
+	enc, err := sealAnonymous(plaintext, key.Key)
+	if err != nil {
+		return fmt.Errorf("encrypt org secret %s: %w", name, err)
+	}
+	es := &gogithub.EncryptedSecret{
+		Name:           name,
+		KeyID:          key.KeyID,
+		EncryptedValue: enc,
+		Visibility:     visibility,
+	}
+	if visibility == "selected" {
+		es.SelectedRepositoryIDs = gogithub.SelectedRepoIDs(append([]int64(nil), selectedRepoIDs...))
+	}
+	if _, err := c.gh.Actions.CreateOrUpdateOrgSecret(ctx, org, es); err != nil {
+		return fmt.Errorf("set org secret %s: %w", name, err)
+	}
+	return nil
+}
+
+// SetOrgDependabotSecret creates or updates an org Dependabot secret with the
+// given visibility envelope.
+func (c *Client) SetOrgDependabotSecret(ctx context.Context, org, name string, key *PublicKey, plaintext, visibility string, selectedRepoIDs []int64) error {
+	if key == nil {
+		return fmt.Errorf("set org dependabot secret %s: missing public key", name)
+	}
+	enc, err := sealAnonymous(plaintext, key.Key)
+	if err != nil {
+		return fmt.Errorf("encrypt org dependabot secret %s: %w", name, err)
+	}
+	es := &gogithub.DependabotEncryptedSecret{
+		Name:           name,
+		KeyID:          key.KeyID,
+		EncryptedValue: enc,
+		Visibility:     visibility,
+	}
+	if visibility == "selected" {
+		es.SelectedRepositoryIDs = gogithub.DependabotSecretsSelectedRepoIDs(append([]int64(nil), selectedRepoIDs...))
+	}
+	if _, err := c.gh.Dependabot.CreateOrUpdateOrgSecret(ctx, org, es); err != nil {
+		return fmt.Errorf("set org dependabot secret %s: %w", name, err)
+	}
+	return nil
+}
+
+// DeleteOrgVariable deletes an org Actions variable.
+func (c *Client) DeleteOrgVariable(ctx context.Context, org, name string) error {
+	if _, err := c.gh.Actions.DeleteOrgVariable(ctx, org, name); err != nil {
+		return fmt.Errorf("delete org variable %s: %w", name, err)
+	}
+	return nil
+}
+
+// DeleteOrgSecret deletes an org Actions secret.
+func (c *Client) DeleteOrgSecret(ctx context.Context, org, name string) error {
+	if _, err := c.gh.Actions.DeleteOrgSecret(ctx, org, name); err != nil {
+		return fmt.Errorf("delete org secret %s: %w", name, err)
+	}
+	return nil
+}
+
+// DeleteOrgDependabotSecret deletes an org Dependabot secret.
+func (c *Client) DeleteOrgDependabotSecret(ctx context.Context, org, name string) error {
+	if _, err := c.gh.Dependabot.DeleteOrgSecret(ctx, org, name); err != nil {
+		return fmt.Errorf("delete org dependabot secret %s: %w", name, err)
+	}
+	return nil
+}
+
+// GetRepoID resolves a repo name to its numeric GitHub ID.
+func (c *Client) GetRepoID(ctx context.Context, org, repo string) (int64, error) {
+	r, _, err := c.gh.Repositories.Get(ctx, org, repo)
+	if err != nil {
+		return 0, fmt.Errorf("get repo %s/%s: %w", org, repo, err)
+	}
+	if r == nil || r.ID == nil {
+		return 0, fmt.Errorf("get repo %s/%s: missing id", org, repo)
+	}
+	return *r.ID, nil
 }
 
 func toPublicKey(pk *gogithub.PublicKey) (*PublicKey, error) {

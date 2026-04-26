@@ -51,6 +51,36 @@ type fakeBackend struct {
 	setErr map[string]error
 	// delErr injects errors for specific (kind, name) pairs on delete.
 	delErr map[string]error
+
+	// Org-scope state.
+	orgVars       map[string]string
+	orgSecrets    []string
+	orgDependabot []string
+
+	orgActionsKeyErr     error
+	orgDependabotKeyErr  error
+	orgActionsKeyFetches int
+	orgDependabotKeyFetches int
+
+	setOrgVarCalls []setOrgVarCall
+	setOrgSecCalls []setOrgSecCall
+	setOrgDepCalls []setOrgSecCall
+	delOrgVarCalls []string
+	delOrgSecCalls []string
+	delOrgDepCalls []string
+
+	repoIDs    map[string]int64
+	repoIDsErr error
+}
+
+type setOrgVarCall struct {
+	name, value, visibility string
+	ids                     []int64
+}
+
+type setOrgSecCall struct {
+	name, plaintext, keyID, visibility string
+	ids                                []int64
 }
 
 type setVarCall struct {
@@ -171,6 +201,108 @@ func (f *fakeBackend) DeleteRepoDependabotSecret(_ context.Context, _, _, name s
 	}
 	f.delDepCalls = append(f.delDepCalls, name)
 	return nil
+}
+
+func (f *fakeBackend) ListOrgVariables(_ context.Context, _ string) (map[string]string, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.orgVars, nil
+}
+func (f *fakeBackend) ListOrgSecrets(_ context.Context, _ string) ([]string, error) {
+	return f.orgSecrets, f.err
+}
+func (f *fakeBackend) ListOrgDependabotSecrets(_ context.Context, _ string) ([]string, error) {
+	return f.orgDependabot, f.err
+}
+func (f *fakeBackend) GetOrgPublicKey(_ context.Context, _ string) (*gh.PublicKey, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.orgActionsKeyFetches++
+	if f.orgActionsKeyErr != nil {
+		return nil, f.orgActionsKeyErr
+	}
+	return &gh.PublicKey{KeyID: "key-org-actions", Key: "AAAA"}, nil
+}
+func (f *fakeBackend) GetOrgDependabotPublicKey(_ context.Context, _ string) (*gh.PublicKey, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.orgDependabotKeyFetches++
+	if f.orgDependabotKeyErr != nil {
+		return nil, f.orgDependabotKeyErr
+	}
+	return &gh.PublicKey{KeyID: "key-org-dep", Key: "BBBB"}, nil
+}
+func (f *fakeBackend) SetOrgVariable(_ context.Context, _, name, value, visibility string, ids []int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.setErr["org/vars/"+name]; ok {
+		return e
+	}
+	f.setOrgVarCalls = append(f.setOrgVarCalls, setOrgVarCall{name, value, visibility, append([]int64(nil), ids...)})
+	return nil
+}
+func (f *fakeBackend) SetOrgSecret(_ context.Context, _, name string, key *gh.PublicKey, plaintext, visibility string, ids []int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.setErr["org/secrets/"+name]; ok {
+		return e
+	}
+	keyID := ""
+	if key != nil {
+		keyID = key.KeyID
+	}
+	f.setOrgSecCalls = append(f.setOrgSecCalls, setOrgSecCall{name, plaintext, keyID, visibility, append([]int64(nil), ids...)})
+	return nil
+}
+func (f *fakeBackend) SetOrgDependabotSecret(_ context.Context, _, name string, key *gh.PublicKey, plaintext, visibility string, ids []int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.setErr["org/dependabot/"+name]; ok {
+		return e
+	}
+	keyID := ""
+	if key != nil {
+		keyID = key.KeyID
+	}
+	f.setOrgDepCalls = append(f.setOrgDepCalls, setOrgSecCall{name, plaintext, keyID, visibility, append([]int64(nil), ids...)})
+	return nil
+}
+func (f *fakeBackend) DeleteOrgVariable(_ context.Context, _, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.delErr["org/vars/"+name]; ok {
+		return e
+	}
+	f.delOrgVarCalls = append(f.delOrgVarCalls, name)
+	return nil
+}
+func (f *fakeBackend) DeleteOrgSecret(_ context.Context, _, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.delErr["org/secrets/"+name]; ok {
+		return e
+	}
+	f.delOrgSecCalls = append(f.delOrgSecCalls, name)
+	return nil
+}
+func (f *fakeBackend) DeleteOrgDependabotSecret(_ context.Context, _, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.delErr["org/dependabot/"+name]; ok {
+		return e
+	}
+	f.delOrgDepCalls = append(f.delOrgDepCalls, name)
+	return nil
+}
+func (f *fakeBackend) GetRepoID(_ context.Context, _, repo string) (int64, error) {
+	if f.repoIDsErr != nil {
+		return 0, f.repoIDsErr
+	}
+	if id, ok := f.repoIDs[repo]; ok {
+		return id, nil
+	}
+	return 0, errors.New("repo id not found: " + repo)
 }
 
 func TestAuditRepo_Drift(t *testing.T) {

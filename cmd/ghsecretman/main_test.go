@@ -86,6 +86,20 @@ type fakeBackend struct {
 	delVars       []string
 	delSecrets    []string
 	delDependabot []string
+
+	orgVars       map[string]string
+	orgSecrets    []string
+	orgDependabot []string
+
+	setOrgVars       []string
+	setOrgSecrets    []string
+	setOrgDependabot []string
+
+	delOrgVars       []string
+	delOrgSecrets    []string
+	delOrgDependabot []string
+
+	repoIDs map[string]int64
 }
 
 func (f *fakeBackend) ListOrgRepos(_ context.Context, _ string) ([]string, error) {
@@ -150,6 +164,64 @@ func (f *fakeBackend) DeleteRepoDependabotSecret(_ context.Context, _, _, name s
 	defer f.mu.Unlock()
 	f.delDependabot = append(f.delDependabot, name)
 	return nil
+}
+
+func (f *fakeBackend) ListOrgVariables(_ context.Context, _ string) (map[string]string, error) {
+	return f.orgVars, nil
+}
+func (f *fakeBackend) ListOrgSecrets(_ context.Context, _ string) ([]string, error) {
+	return f.orgSecrets, nil
+}
+func (f *fakeBackend) ListOrgDependabotSecrets(_ context.Context, _ string) ([]string, error) {
+	return f.orgDependabot, nil
+}
+func (f *fakeBackend) GetOrgPublicKey(_ context.Context, _ string) (*gh.PublicKey, error) {
+	return &gh.PublicKey{KeyID: "org-actions-kid", Key: "AAAA"}, nil
+}
+func (f *fakeBackend) GetOrgDependabotPublicKey(_ context.Context, _ string) (*gh.PublicKey, error) {
+	return &gh.PublicKey{KeyID: "org-dep-kid", Key: "BBBB"}, nil
+}
+func (f *fakeBackend) SetOrgVariable(_ context.Context, _, name, _, _ string, _ []int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setOrgVars = append(f.setOrgVars, name)
+	return nil
+}
+func (f *fakeBackend) SetOrgSecret(_ context.Context, _, name string, _ *gh.PublicKey, _, _ string, _ []int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setOrgSecrets = append(f.setOrgSecrets, name)
+	return nil
+}
+func (f *fakeBackend) SetOrgDependabotSecret(_ context.Context, _, name string, _ *gh.PublicKey, _, _ string, _ []int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setOrgDependabot = append(f.setOrgDependabot, name)
+	return nil
+}
+func (f *fakeBackend) DeleteOrgVariable(_ context.Context, _, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.delOrgVars = append(f.delOrgVars, name)
+	return nil
+}
+func (f *fakeBackend) DeleteOrgSecret(_ context.Context, _, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.delOrgSecrets = append(f.delOrgSecrets, name)
+	return nil
+}
+func (f *fakeBackend) DeleteOrgDependabotSecret(_ context.Context, _, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.delOrgDependabot = append(f.delOrgDependabot, name)
+	return nil
+}
+func (f *fakeBackend) GetRepoID(_ context.Context, _, repo string) (int64, error) {
+	if id, ok := f.repoIDs[repo]; ok {
+		return id, nil
+	}
+	return 0, nil
 }
 
 func writeCfg(t *testing.T, dir, body string) string {
