@@ -294,7 +294,7 @@ github.com:
 	swapBackend(t, &fakeBackend{vars: map[string]string{"V": "ok"}}, nil)
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"ghsecretman", "audit", "--config", cfgPath, "--org", "example", "--repo", "acme"}, "dev", &stdout, &stderr)
+	code := run([]string{"ghsecretman", "audit", "--config", cfgPath, "--org", "example", "--repo", "acme", "--verbose"}, "dev", &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit: got %d want 0; stderr=%q", code, stderr.String())
 	}
@@ -623,7 +623,7 @@ github.com:
 	swapBackend(t, be, nil)
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"ghsecretman", "audit", "--config", cfgPath, "--org", "example"}, "dev", &stdout, &stderr)
+	code := run([]string{"ghsecretman", "audit", "--config", cfgPath, "--org", "example", "--verbose"}, "dev", &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit: got %d want 0; stderr=%q\nstdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -765,7 +765,7 @@ github.com:
 	swapBackend(t, be, nil)
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"ghsecretman", "audit", "--config", cfgPath, "--org", "example"}, "dev", &stdout, &stderr)
+	code := run([]string{"ghsecretman", "audit", "--config", cfgPath, "--org", "example", "--verbose"}, "dev", &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit: got %d want 0; stderr=%q\nstdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -914,5 +914,126 @@ func TestRun_Example_ForceOverwrite(t *testing.T) {
 				t.Fatalf("file not overwritten with example: %q", data)
 			}
 		})
+	}
+}
+
+// TestRun_AuditClean_NonVerboseSilent locks in the non-verbose default:
+// when nothing differs, audit produces only a summary line (no per-repo
+// stanza, no `match` entries).
+func TestRun_AuditClean_NonVerboseSilent(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              value: ok
+`)
+	swapBackend(t, &fakeBackend{vars: map[string]string{"V": "ok"}}, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "audit", "--config", cfgPath, "--org", "example", "--repo", "acme"}, "dev", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d want 0; stderr=%q", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "repo: acme") {
+		t.Errorf("non-verbose should not emit per-repo header for clean repo: %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "match") {
+		t.Errorf("non-verbose should not emit match entries: %q", stdout.String())
+	}
+}
+
+// TestRun_AuditDrift_NonVerboseShowsOnlyDrift confirms that with drift
+// present, non-verbose emits the per-repo header and only the drift
+// entries (no `match` lines for the entries that were correct).
+func TestRun_AuditDrift_NonVerboseShowsOnlyDrift(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            OK:
+              value: same
+            DRIFT:
+              value: yaml
+`)
+	swapBackend(t, &fakeBackend{vars: map[string]string{"OK": "same", "DRIFT": "live"}}, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "audit", "--config", cfgPath, "--org", "example", "--repo", "acme"}, "dev", &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("expected non-zero exit on drift")
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "repo: acme") {
+		t.Errorf("expected stanza header when drift exists: %q", out)
+	}
+	if !strings.Contains(out, "vars/DRIFT: mismatch") {
+		t.Errorf("expected DRIFT mismatch line: %q", out)
+	}
+	if strings.Contains(out, "vars/OK: match") {
+		t.Errorf("non-verbose should not emit `match` for OK: %q", out)
+	}
+}
+
+// TestRun_AuditClean_VerboseEmitsStanza is the inverse: with --verbose,
+// even a clean repo emits a header and `match` lines.
+func TestRun_AuditClean_VerboseEmitsStanza(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              value: ok
+`)
+	swapBackend(t, &fakeBackend{vars: map[string]string{"V": "ok"}}, nil)
+
+	for _, flag := range []string{"-v", "--verbose"} {
+		t.Run(flag, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"ghsecretman", "audit", "--config", cfgPath, "--org", "example", "--repo", "acme", flag}, "dev", &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit: got %d want 0; stderr=%q", code, stderr.String())
+			}
+			out := stdout.String()
+			if !strings.Contains(out, "repo: acme") || !strings.Contains(out, "vars/V: match") {
+				t.Errorf("verbose should emit header and match lines: %q", out)
+			}
+		})
+	}
+}
+
+// TestRun_EnforceNoEvents_NonVerboseSilent: an enforce on a repo with no
+// managed entries and no extras produces only a summary line in
+// non-verbose mode.
+func TestRun_EnforceNoEvents_NonVerboseSilent(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed: {}
+`)
+	swapBackend(t, &fakeBackend{}, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "enforce", "--config", cfgPath, "--org", "example", "--repo", "acme"}, "dev", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d want 0; stderr=%q", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "repo: acme") {
+		t.Errorf("non-verbose should suppress per-repo header for no-event enforce: %q", stdout.String())
 	}
 }
