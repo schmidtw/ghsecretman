@@ -309,11 +309,15 @@ func (c *Client) SetOrgVariable(ctx context.Context, org, name, value, visibilit
 	return fmt.Errorf("update org variable %s: %w", name, err)
 }
 
+// visibilitySelected names the only org-scope visibility value that takes a
+// selected_repository_ids payload.
+const visibilitySelected = "selected"
+
 func buildOrgVariable(name, value, visibility string, selectedRepoIDs []int64) *gogithub.ActionsVariable {
 	v := &gogithub.ActionsVariable{Name: name, Value: value}
 	vis := visibility
 	v.Visibility = &vis
-	if visibility == "selected" {
+	if visibility == visibilitySelected {
 		ids := gogithub.SelectedRepoIDs(append([]int64(nil), selectedRepoIDs...))
 		v.SelectedRepositoryIDs = &ids
 	}
@@ -336,7 +340,7 @@ func (c *Client) SetOrgSecret(ctx context.Context, org, name string, key *Public
 		EncryptedValue: enc,
 		Visibility:     visibility,
 	}
-	if visibility == "selected" {
+	if visibility == visibilitySelected {
 		es.SelectedRepositoryIDs = gogithub.SelectedRepoIDs(append([]int64(nil), selectedRepoIDs...))
 	}
 	if _, err := c.gh.Actions.CreateOrUpdateOrgSecret(ctx, org, es); err != nil {
@@ -361,7 +365,7 @@ func (c *Client) SetOrgDependabotSecret(ctx context.Context, org, name string, k
 		EncryptedValue: enc,
 		Visibility:     visibility,
 	}
-	if visibility == "selected" {
+	if visibility == visibilitySelected {
 		es.SelectedRepositoryIDs = gogithub.DependabotSecretsSelectedRepoIDs(append([]int64(nil), selectedRepoIDs...))
 	}
 	if _, err := c.gh.Dependabot.CreateOrUpdateOrgSecret(ctx, org, es); err != nil {

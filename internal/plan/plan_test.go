@@ -4,6 +4,7 @@
 package plan
 
 import (
+	"slices"
 	"sort"
 	"testing"
 
@@ -436,13 +437,5 @@ func summarize(in []Intent) []string {
 }
 
 func equal(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return slices.Equal(a, b)
 }

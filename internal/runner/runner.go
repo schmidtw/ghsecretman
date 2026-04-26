@@ -485,69 +485,388 @@ func runOrg(ctx context.Context, repos []string, concurrency int, out io.Writer,
 	return res
 }
 
-// Audit runs an audit across every repo in the org concurrently. Per-repo
-// errors are reported and the run continues. The final summary line counts
-// ok, skipped, and failed repos.
+// Audit runs an audit across the org-level scope (when configured) and every
+// repo in the org concurrently. Per-repo errors are reported and the run
+// continues. The final summary line counts ok, skipped, and failed repos.
 func Audit(ctx context.Context, cfg *config.Config, org string, backend gh.Backend, out io.Writer, showIgnored bool, opts OrgOptions) (OrgResult, error) {
 	o, ok := cfg.Org(org)
 	if !ok {
 		return OrgResult{}, fmt.Errorf("org %q not found in config", org)
 	}
+	res := OrgResult{}
+	if o.OrgScope != nil {
+		orgRes, err := AuditOrgScope(ctx, cfg, org, backend, out, showIgnored)
+		if err != nil {
+			fmt.Fprintf(out, "org: %s\nscope: org\n  ERROR: %v\n", org, err)
+			res.FailedRepos++
+		} else if orgRes.Drift {
+			res.Drift = true
+		}
+	}
 	repos, skipped, err := targetRepos(ctx, backend, o, org)
 	if err != nil {
 		return OrgResult{}, err
 	}
-	res := runOrg(ctx, repos, opts.Concurrency, out, func(repo string) repoWork {
+	r := runOrg(ctx, repos, opts.Concurrency, out, func(repo string) repoWork {
 		return func(ctx context.Context, buf *bytes.Buffer) (Result, error) {
 			return AuditRepo(ctx, cfg, org, repo, backend, buf, showIgnored)
 		}
 	})
-	res.SkippedRepos = skipped
+	mergeOrgResult(&res, r, skipped)
 	fmt.Fprintf(out, "summary: ok=%d skipped=%d failed=%d\n", res.OkRepos, res.SkippedRepos, res.FailedRepos)
 	return res, nil
 }
 
-// Apply runs apply across every repo in the org concurrently. Per-repo
-// errors are reported and the run continues; per-entry write failures are
-// summed into FailedEntries.
+func mergeOrgResult(dst *OrgResult, src OrgResult, skipped int) {
+	dst.OkRepos += src.OkRepos
+	dst.FailedRepos += src.FailedRepos
+	dst.FailedEntries += src.FailedEntries
+	dst.SkippedRepos += skipped
+	if src.Drift {
+		dst.Drift = true
+	}
+}
+
+// Apply runs apply across the org-level scope (when configured) and every
+// repo in the org concurrently. Per-repo errors are reported and the run
+// continues; per-entry write failures are summed into FailedEntries.
 func Apply(ctx context.Context, cfg *config.Config, org string, backend gh.Backend, out io.Writer, opts OrgOptions) (OrgResult, error) {
 	o, ok := cfg.Org(org)
 	if !ok {
 		return OrgResult{}, fmt.Errorf("org %q not found in config", org)
 	}
+	res := OrgResult{}
+	if o.OrgScope != nil {
+		orgRes, err := ApplyOrgScope(ctx, cfg, org, backend, out)
+		if err != nil {
+			fmt.Fprintf(out, "org: %s\nscope: org\n  ERROR: %v\n", org, err)
+			res.FailedRepos++
+		} else {
+			res.FailedEntries += orgRes.Failed
+		}
+	}
 	repos, skipped, err := targetRepos(ctx, backend, o, org)
 	if err != nil {
 		return OrgResult{}, err
 	}
-	res := runOrg(ctx, repos, opts.Concurrency, out, func(repo string) repoWork {
+	r := runOrg(ctx, repos, opts.Concurrency, out, func(repo string) repoWork {
 		return func(ctx context.Context, buf *bytes.Buffer) (Result, error) {
 			return ApplyRepo(ctx, cfg, org, repo, backend, buf)
 		}
 	})
-	res.SkippedRepos = skipped
+	mergeOrgResult(&res, r, skipped)
 	fmt.Fprintf(out, "summary: ok=%d skipped=%d failed=%d\n", res.OkRepos, res.SkippedRepos, res.FailedRepos)
 	return res, nil
 }
 
-// Enforce runs enforce across every repo in the org concurrently. The
-// provided opts are forwarded to each EnforceRepo call.
+// Enforce runs enforce across the org-level scope (when configured) and
+// every repo in the org concurrently. The provided opts are forwarded to
+// each EnforceRepo / EnforceOrgScope call.
 func Enforce(ctx context.Context, cfg *config.Config, org string, backend gh.Backend, out io.Writer, opts EnforceOptions) (OrgResult, error) {
 	o, ok := cfg.Org(org)
 	if !ok {
 		return OrgResult{}, fmt.Errorf("org %q not found in config", org)
 	}
+	res := OrgResult{}
+	if o.OrgScope != nil {
+		orgRes, err := EnforceOrgScope(ctx, cfg, org, backend, out, opts)
+		if err != nil {
+			fmt.Fprintf(out, "org: %s\nscope: org\n  ERROR: %v\n", org, err)
+			res.FailedRepos++
+		} else {
+			res.FailedEntries += orgRes.Failed
+		}
+	}
 	repos, skipped, err := targetRepos(ctx, backend, o, org)
 	if err != nil {
 		return OrgResult{}, err
 	}
-	res := runOrg(ctx, repos, opts.Concurrency, out, func(repo string) repoWork {
+	r := runOrg(ctx, repos, opts.Concurrency, out, func(repo string) repoWork {
 		return func(ctx context.Context, buf *bytes.Buffer) (Result, error) {
 			return EnforceRepo(ctx, cfg, org, repo, backend, buf, opts)
 		}
 	})
-	res.SkippedRepos = skipped
+	mergeOrgResult(&res, r, skipped)
 	fmt.Fprintf(out, "summary: ok=%d skipped=%d failed=%d\n", res.OkRepos, res.SkippedRepos, res.FailedRepos)
 	return res, nil
+}
+
+// AuditOrgScope audits the org-level secrets, variables, and Dependabot
+// secrets defined under the org's `org:` block. It writes a single labeled
+// stanza to out. If the config has no `org:` block for orgName, the call is
+// a no-op (zero-value Result, no stanza, no error).
+func AuditOrgScope(ctx context.Context, cfg *config.Config, orgName string, backend gh.Backend, out io.Writer, showIgnored bool) (Result, error) {
+	o, ok := cfg.Org(orgName)
+	if !ok {
+		return Result{}, fmt.Errorf("org %q not found in config", orgName)
+	}
+	if o.OrgScope == nil {
+		return Result{}, nil
+	}
+	intents := plan.ForOrg(o.OrgScope)
+	desiredVars, err := resolveVars(intents)
+	if err != nil {
+		return Result{}, err
+	}
+	live, err := fetchOrgLive(ctx, backend, orgName)
+	if err != nil {
+		return Result{}, err
+	}
+	effIgnored := plan.EffectiveOrgIgnored(o.OrgScope)
+	entries := diff.Compute("", intents, desiredVars, live, effIgnored)
+	writeOrgStanza(out, orgName, entries, showIgnored)
+	return Result{Drift: diff.HasDrift(entries)}, nil
+}
+
+func fetchOrgLive(ctx context.Context, backend gh.Backend, org string) (diff.Live, error) {
+	vars, err := backend.ListOrgVariables(ctx, org)
+	if err != nil {
+		return diff.Live{}, err
+	}
+	secrets, err := backend.ListOrgSecrets(ctx, org)
+	if err != nil {
+		return diff.Live{}, err
+	}
+	dependabot, err := backend.ListOrgDependabotSecrets(ctx, org)
+	if err != nil {
+		return diff.Live{}, err
+	}
+	return diff.Live{Vars: vars, Secrets: secrets, Dependabot: dependabot}, nil
+}
+
+func writeOrgStanza(out io.Writer, orgName string, entries []diff.Entry, showIgnored bool) {
+	fmt.Fprintf(out, "org: %s\nscope: org\n", orgName)
+	for _, e := range entries {
+		if e.Status == diff.Ignored && !showIgnored {
+			continue
+		}
+		switch e.Status {
+		case diff.Mismatch:
+			fmt.Fprintf(out, "  %s/%s: mismatch (yaml=%q live=%q)\n", e.Kind, e.Name, e.DesiredValue, e.LiveValue)
+		default:
+			fmt.Fprintf(out, "  %s/%s: %s\n", e.Kind, e.Name, e.Status)
+		}
+	}
+}
+
+// ApplyOrgScope writes org-level managed entries. It never deletes and never
+// touches anything outside the org's `org.managed` block. Returns Result with
+// per-entry write failures counted in Failed.
+func ApplyOrgScope(ctx context.Context, cfg *config.Config, orgName string, backend gh.Backend, out io.Writer) (Result, error) {
+	o, ok := cfg.Org(orgName)
+	if !ok {
+		return Result{}, fmt.Errorf("org %q not found in config", orgName)
+	}
+	if o.OrgScope == nil {
+		return Result{}, nil
+	}
+	intents := plan.ForOrg(o.OrgScope)
+	resolved, err := resolveAll(intents)
+	if err != nil {
+		return Result{}, err
+	}
+	idsByIntent, err := resolveSelectedRepoIDs(ctx, backend, orgName, intents)
+	if err != nil {
+		return Result{}, err
+	}
+	actionsKey, depKey, err := fetchOrgKeys(ctx, backend, orgName, intents)
+	if err != nil {
+		return Result{}, err
+	}
+	fmt.Fprintf(out, "org: %s\nscope: org\n", orgName)
+	res := Result{}
+	for _, in := range intents {
+		if in.Action != plan.ActionManaged {
+			continue
+		}
+		err := applyOrgOne(ctx, backend, orgName, in, resolved[entryKey(in)], idsByIntent[entryKey(in)], actionsKey, depKey)
+		if err != nil {
+			res.Failed++
+			fmt.Fprintf(out, "  %s/%s: FAILED: %v\n", in.Kind, in.Name, err)
+			continue
+		}
+		fmt.Fprintf(out, "  %s/%s: ok\n", in.Kind, in.Name)
+	}
+	if res.Failed > 0 {
+		fmt.Fprintf(out, "summary: %d failed\n", res.Failed)
+	}
+	return res, nil
+}
+
+func applyOrgOne(ctx context.Context, backend gh.Backend, org string, in plan.Intent, value string, ids []int64, actionsKey, depKey *gh.PublicKey) error {
+	switch in.Kind {
+	case plan.KindVar:
+		return backend.SetOrgVariable(ctx, org, in.Name, value, in.Visibility, ids)
+	case plan.KindSecret:
+		return backend.SetOrgSecret(ctx, org, in.Name, actionsKey, value, in.Visibility, ids)
+	case plan.KindDependabot:
+		return backend.SetOrgDependabotSecret(ctx, org, in.Name, depKey, value, in.Visibility, ids)
+	}
+	return fmt.Errorf("unknown kind %q", in.Kind)
+}
+
+func fetchOrgKeys(ctx context.Context, backend gh.Backend, org string, intents []plan.Intent) (actions, dependabot *gh.PublicKey, err error) {
+	needsActions, needsDep := false, false
+	for _, in := range intents {
+		if in.Action != plan.ActionManaged {
+			continue
+		}
+		switch in.Kind {
+		case plan.KindSecret:
+			needsActions = true
+		case plan.KindDependabot:
+			needsDep = true
+		}
+	}
+	if needsActions {
+		actions, err = backend.GetOrgPublicKey(ctx, org)
+		if err != nil {
+			return nil, nil, fmt.Errorf("fetch org actions public key: %w", err)
+		}
+	}
+	if needsDep {
+		dependabot, err = backend.GetOrgDependabotPublicKey(ctx, org)
+		if err != nil {
+			return nil, nil, fmt.Errorf("fetch org dependabot public key: %w", err)
+		}
+	}
+	return actions, dependabot, nil
+}
+
+// resolveSelectedRepoIDs translates each managed intent's `repos:` list into
+// a slice of numeric repo IDs. Names are looked up at most once per call,
+// even when multiple entries reference the same repo.
+func resolveSelectedRepoIDs(ctx context.Context, backend gh.Backend, org string, intents []plan.Intent) (map[string][]int64, error) {
+	out := map[string][]int64{}
+	cache := map[string]int64{}
+	for _, in := range intents {
+		if in.Action != plan.ActionManaged || in.Visibility != "selected" {
+			continue
+		}
+		ids := make([]int64, 0, len(in.SelectedRepos))
+		for _, name := range in.SelectedRepos {
+			id, ok := cache[name]
+			if !ok {
+				v, err := backend.GetRepoID(ctx, org, name)
+				if err != nil {
+					return nil, fmt.Errorf("resolve repo id %s/%s: %w", org, name, err)
+				}
+				cache[name] = v
+				id = v
+			}
+			ids = append(ids, id)
+		}
+		out[entryKey(in)] = ids
+	}
+	return out, nil
+}
+
+// EnforceOrgScope applies org-level managed entries, then deletes extras.
+//
+// With DryRun=true, no write API calls are made. Confirm is invoked exactly
+// once with the list of planned deletions; if it returns false, neither the
+// apply nor the delete phase runs.
+func EnforceOrgScope(ctx context.Context, cfg *config.Config, orgName string, backend gh.Backend, out io.Writer, opts EnforceOptions) (Result, error) {
+	o, ok := cfg.Org(orgName)
+	if !ok {
+		return Result{}, fmt.Errorf("org %q not found in config", orgName)
+	}
+	if o.OrgScope == nil {
+		return Result{}, nil
+	}
+	intents := plan.ForOrg(o.OrgScope)
+	resolved, err := resolveForEnforce(intents, opts.DryRun)
+	if err != nil {
+		return Result{}, err
+	}
+	live, err := fetchOrgLive(ctx, backend, orgName)
+	if err != nil {
+		return Result{}, err
+	}
+	effIgnored := plan.EffectiveOrgIgnored(o.OrgScope)
+	entries := diff.Compute("", intents, desiredVarsFromResolved(intents, resolved), live, effIgnored)
+
+	if !opts.DryRun && opts.Confirm != nil && !opts.Confirm(extraKindNames(entries)) {
+		return Result{}, nil
+	}
+
+	var (
+		idsByIntent map[string][]int64
+		actionsKey  *gh.PublicKey
+		depKey      *gh.PublicKey
+	)
+	if !opts.DryRun {
+		idsByIntent, err = resolveSelectedRepoIDs(ctx, backend, orgName, intents)
+		if err != nil {
+			return Result{}, err
+		}
+		actionsKey, depKey, err = fetchOrgKeys(ctx, backend, orgName, intents)
+		if err != nil {
+			return Result{}, err
+		}
+	}
+
+	fmt.Fprintf(out, "org: %s\nscope: org\n", orgName)
+	res := Result{}
+	res.Failed += runOrgApplyPhase(ctx, backend, orgName, intents, resolved, idsByIntent, actionsKey, depKey, out, opts.DryRun)
+	res.Failed += runOrgDeletePhase(ctx, backend, orgName, entries, out, opts.DryRun)
+	if res.Failed > 0 {
+		fmt.Fprintf(out, "summary: %d failed\n", res.Failed)
+	}
+	return res, nil
+}
+
+func runOrgApplyPhase(ctx context.Context, backend gh.Backend, org string, intents []plan.Intent, resolved map[string]string, idsByIntent map[string][]int64, actionsKey, depKey *gh.PublicKey, out io.Writer, dryRun bool) int {
+	failed := 0
+	for _, in := range intents {
+		if in.Action != plan.ActionManaged {
+			continue
+		}
+		if dryRun {
+			fmt.Fprintf(out, "  %s/%s: would-set\n", in.Kind, in.Name)
+			continue
+		}
+		err := applyOrgOne(ctx, backend, org, in, resolved[entryKey(in)], idsByIntent[entryKey(in)], actionsKey, depKey)
+		if err != nil {
+			failed++
+			fmt.Fprintf(out, "  %s/%s: FAILED: %v\n", in.Kind, in.Name, err)
+			continue
+		}
+		fmt.Fprintf(out, "  %s/%s: ok\n", in.Kind, in.Name)
+	}
+	return failed
+}
+
+func runOrgDeletePhase(ctx context.Context, backend gh.Backend, org string, entries []diff.Entry, out io.Writer, dryRun bool) int {
+	failed := 0
+	for _, e := range entries {
+		if e.Status != diff.Extra {
+			continue
+		}
+		if dryRun {
+			fmt.Fprintf(out, "  %s/%s: would-delete\n", e.Kind, e.Name)
+			continue
+		}
+		if err := deleteOrgOne(ctx, backend, org, e.Kind, e.Name); err != nil {
+			failed++
+			fmt.Fprintf(out, "  %s/%s: FAILED: %v\n", e.Kind, e.Name, err)
+			continue
+		}
+		fmt.Fprintf(out, "  %s/%s: deleted\n", e.Kind, e.Name)
+	}
+	return failed
+}
+
+func deleteOrgOne(ctx context.Context, backend gh.Backend, org string, kind plan.Kind, name string) error {
+	switch kind {
+	case plan.KindVar:
+		return backend.DeleteOrgVariable(ctx, org, name)
+	case plan.KindSecret:
+		return backend.DeleteOrgSecret(ctx, org, name)
+	case plan.KindDependabot:
+		return backend.DeleteOrgDependabotSecret(ctx, org, name)
+	}
+	return fmt.Errorf("unknown kind %q", kind)
 }
 
 // writeFile is a thin wrapper used by tests to materialize fixture YAML.
