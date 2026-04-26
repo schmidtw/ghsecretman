@@ -840,6 +840,433 @@ github.com:
 	}
 }
 
+func TestEnforceRepo_DeletesExtrasAndAppliesManaged(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V_KEEP:
+              value: ok
+          secrets:
+            S_KEEP:
+              value: ok
+          dependabot:
+            D_KEEP:
+              value: ok
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{
+		vars:       map[string]string{"V_KEEP": "ok", "V_EXTRA1": "x", "V_EXTRA2": "y"},
+		secrets:    []string{"S_KEEP", "S_EXTRA"},
+		dependabot: []string{"D_KEEP", "D_EXTRA"},
+	}
+	var out bytes.Buffer
+	res, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &out, EnforceOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Failed != 0 {
+		t.Errorf("expected zero failures, got %d", res.Failed)
+	}
+	if !equalSorted(be.delVarCalls, []string{"V_EXTRA1", "V_EXTRA2"}) {
+		t.Errorf("var deletes: got %v want [V_EXTRA1 V_EXTRA2]", be.delVarCalls)
+	}
+	if !equalSorted(be.delSecCalls, []string{"S_EXTRA"}) {
+		t.Errorf("secret deletes: got %v want [S_EXTRA]", be.delSecCalls)
+	}
+	if !equalSorted(be.delDepCalls, []string{"D_EXTRA"}) {
+		t.Errorf("dependabot deletes: got %v want [D_EXTRA]", be.delDepCalls)
+	}
+	if !equalSorted(callNames(be.setVarCalls), []string{"V_KEEP"}) {
+		t.Errorf("var sets: got %v", callNames(be.setVarCalls))
+	}
+	if !equalSorted(secretCallNames(be.setSecCalls), []string{"S_KEEP"}) {
+		t.Errorf("secret sets: got %v", secretCallNames(be.setSecCalls))
+	}
+	if !equalSorted(secretCallNames(be.setDepCalls), []string{"D_KEEP"}) {
+		t.Errorf("dependabot sets: got %v", secretCallNames(be.setDepCalls))
+	}
+
+	s := out.String()
+	for _, want := range []string{
+		"repo: acme",
+		"vars/V_KEEP: ok",
+		"vars/V_EXTRA1: deleted",
+		"secrets/S_EXTRA: deleted",
+		"dependabot/D_EXTRA: deleted",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("output missing %q\n--\n%s", want, s)
+		}
+	}
+}
+
+func TestEnforceRepo_IgnoredExtrasNotDeleted(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V_KEEP:
+              value: ok
+        ignored:
+          vars:
+            - V_LEAVE_ALONE
+          secrets:
+            - S_LEAVE_ALONE
+          dependabot:
+            - D_LEAVE_ALONE
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{
+		vars:       map[string]string{"V_KEEP": "ok", "V_LEAVE_ALONE": "x", "V_EXTRA": "y"},
+		secrets:    []string{"S_LEAVE_ALONE", "S_EXTRA"},
+		dependabot: []string{"D_LEAVE_ALONE"},
+	}
+	var out bytes.Buffer
+	if _, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &out, EnforceOptions{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, n := range be.delVarCalls {
+		if n == "V_LEAVE_ALONE" {
+			t.Errorf("ignored var V_LEAVE_ALONE should not be deleted; got %v", be.delVarCalls)
+		}
+	}
+	for _, n := range be.delSecCalls {
+		if n == "S_LEAVE_ALONE" {
+			t.Errorf("ignored secret S_LEAVE_ALONE should not be deleted; got %v", be.delSecCalls)
+		}
+	}
+	for _, n := range be.delDepCalls {
+		if n == "D_LEAVE_ALONE" {
+			t.Errorf("ignored dependabot D_LEAVE_ALONE should not be deleted; got %v", be.delDepCalls)
+		}
+	}
+	if !equalSorted(be.delVarCalls, []string{"V_EXTRA"}) {
+		t.Errorf("var deletes: got %v want [V_EXTRA]", be.delVarCalls)
+	}
+	if !equalSorted(be.delSecCalls, []string{"S_EXTRA"}) {
+		t.Errorf("secret deletes: got %v want [S_EXTRA]", be.delSecCalls)
+	}
+	if len(be.delDepCalls) != 0 {
+		t.Errorf("dependabot deletes: got %v want []", be.delDepCalls)
+	}
+	s := out.String()
+	for _, name := range []string{"V_LEAVE_ALONE", "S_LEAVE_ALONE", "D_LEAVE_ALONE"} {
+		if strings.Contains(s, name) {
+			t.Errorf("ignored name %q must not appear in enforce output:\n%s", name, s)
+		}
+	}
+}
+
+func TestEnforceRepo_DryRunSkipsAllWrites(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V_KEEP:
+              value: ok
+          secrets:
+            S_KEEP:
+              value: ok
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{
+		vars:    map[string]string{"V_EXTRA": "x"},
+		secrets: []string{"S_EXTRA"},
+	}
+	var out bytes.Buffer
+	res, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &out, EnforceOptions{DryRun: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Failed != 0 {
+		t.Errorf("expected zero failures, got %d", res.Failed)
+	}
+	if len(be.setVarCalls)+len(be.setSecCalls)+len(be.setDepCalls) != 0 {
+		t.Errorf("dry-run made set calls: vars=%v secs=%v deps=%v",
+			be.setVarCalls, be.setSecCalls, be.setDepCalls)
+	}
+	if len(be.delVarCalls)+len(be.delSecCalls)+len(be.delDepCalls) != 0 {
+		t.Errorf("dry-run made delete calls: vars=%v secs=%v deps=%v",
+			be.delVarCalls, be.delSecCalls, be.delDepCalls)
+	}
+	if be.actionsKeyFetches != 0 || be.dependabotKeyFetches != 0 {
+		t.Errorf("dry-run should not fetch public keys; actions=%d dep=%d",
+			be.actionsKeyFetches, be.dependabotKeyFetches)
+	}
+	s := out.String()
+	for _, want := range []string{
+		"vars/V_KEEP: would-set",
+		"secrets/S_KEEP: would-set",
+		"vars/V_EXTRA: would-delete",
+		"secrets/S_EXTRA: would-delete",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("dry-run output missing %q\n--\n%s", want, s)
+		}
+	}
+}
+
+func TestEnforceRepo_DryRunDoesNotResolve(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              env: GHSM_TEST_ENFORCE_DRYRUN_NEVER_SET
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{}
+	if _, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}, EnforceOptions{DryRun: true}); err != nil {
+		t.Fatalf("dry-run should not require value resolution; got: %v", err)
+	}
+}
+
+func TestEnforceRepo_DeleteFailureContinues(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed: {}
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{
+		vars:   map[string]string{"V_BAD": "x", "V_GOOD": "y"},
+		delErr: map[string]error{"vars/V_BAD": errors.New("boom")},
+	}
+	var out bytes.Buffer
+	res, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &out, EnforceOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Failed != 1 {
+		t.Errorf("expected 1 failure, got %d", res.Failed)
+	}
+	if !equalSorted(be.delVarCalls, []string{"V_GOOD"}) {
+		t.Errorf("V_GOOD should still be deleted after V_BAD failed: got %v", be.delVarCalls)
+	}
+	s := out.String()
+	if !strings.Contains(s, "vars/V_BAD: FAILED: boom") {
+		t.Errorf("output missing failure line:\n%s", s)
+	}
+	if !strings.Contains(s, "summary: 1 failed") {
+		t.Errorf("output missing summary line:\n%s", s)
+	}
+}
+
+func TestEnforceRepo_ConfirmCallbackReceivesExtras(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed: {}
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{
+		vars:       map[string]string{"V_X": "x"},
+		secrets:    []string{"S_X"},
+		dependabot: []string{"D_X"},
+	}
+	var got []string
+	confirm := func(extras []string) bool {
+		got = append([]string(nil), extras...)
+		return true
+	}
+	if _, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{},
+		EnforceOptions{Confirm: confirm}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !equalSorted(got, []string{"vars/V_X", "secrets/S_X", "dependabot/D_X"}) {
+		t.Errorf("Confirm got %v, want sorted-equal of [vars/V_X secrets/S_X dependabot/D_X]", got)
+	}
+	if len(be.delVarCalls) != 1 || len(be.delSecCalls) != 1 || len(be.delDepCalls) != 1 {
+		t.Errorf("expected one delete per kind after confirm=true; got vars=%v secs=%v deps=%v",
+			be.delVarCalls, be.delSecCalls, be.delDepCalls)
+	}
+}
+
+func TestEnforceRepo_ConfirmFalseSkipsAllWrites(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V_KEEP:
+              value: ok
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{vars: map[string]string{"V_X": "x"}}
+	confirm := func(_ []string) bool { return false }
+	res, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{},
+		EnforceOptions{Confirm: confirm})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Failed != 0 {
+		t.Errorf("Failed should be 0 when confirm declined")
+	}
+	if len(be.setVarCalls)+len(be.delVarCalls) != 0 {
+		t.Errorf("confirm=false must skip all writes; sets=%v dels=%v", be.setVarCalls, be.delVarCalls)
+	}
+	if be.actionsKeyFetches != 0 {
+		t.Errorf("public key should not be fetched when confirm declines; got %d", be.actionsKeyFetches)
+	}
+}
+
+func TestEnforceRepo_DryRunIgnoresConfirm(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed: {}
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{vars: map[string]string{"V_X": "x"}}
+	called := false
+	confirm := func(_ []string) bool {
+		called = true
+		return false
+	}
+	if _, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{},
+		EnforceOptions{DryRun: true, Confirm: confirm}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if called {
+		t.Errorf("Confirm must not be invoked when DryRun is true")
+	}
+}
+
+func TestEnforceRepo_UnknownOrgRepo(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Orgs: map[string]*config.Org{}}
+	if _, err := EnforceRepo(context.Background(), cfg, "missing", "acme", &fakeBackend{}, &bytes.Buffer{}, EnforceOptions{}); err == nil {
+		t.Fatal("expected error for unknown org")
+	}
+	cfg.Orgs["example"] = &config.Org{PerRepo: map[string]*config.Repo{}}
+	if _, err := EnforceRepo(context.Background(), cfg, "example", "missing", &fakeBackend{}, &bytes.Buffer{}, EnforceOptions{}); err == nil {
+		t.Fatal("expected error for unknown repo")
+	}
+}
+
+func TestEnforceRepo_BackendListError(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		Orgs: map[string]*config.Org{
+			"example": {PerRepo: map[string]*config.Repo{"acme": {}}},
+		},
+	}
+	be := &fakeBackend{err: errors.New("boom")}
+	if _, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}, EnforceOptions{}); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestEnforceRepo_ResolveErrorWhenLive(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              file: missing.txt
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnforceRepo(context.Background(), cfg, "example", "acme", &fakeBackend{}, &bytes.Buffer{}, EnforceOptions{}); err == nil {
+		t.Fatal("expected resolve error in live enforce mode")
+	}
+}
+
 func TestAuditRepo_ShowIgnored(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

@@ -210,6 +210,134 @@ func fetchKeys(ctx context.Context, backend gh.Backend, org, repo string, intent
 	return actions, dependabot, nil
 }
 
+// EnforceOptions controls EnforceRepo behavior.
+type EnforceOptions struct {
+	// DryRun prints planned set/delete actions and makes zero write API
+	// calls. The public-key fetch and value resolution are also skipped
+	// since neither is needed without a real write.
+	DryRun bool
+
+	// Confirm, if non-nil and DryRun is false, is invoked after the live
+	// state has been fetched and the extras list computed. The argument
+	// is a list of "kind/name" strings, one per planned deletion. If
+	// Confirm returns false, no writes or deletes are performed and
+	// Result is the zero value. Confirm is ignored when DryRun is true.
+	Confirm func(extras []string) bool
+}
+
+// EnforceRepo applies managed values and then deletes any "extra" entries
+// — entries present on the repo but not listed in either the managed or
+// ignored block. With DryRun=true, it prints intended set/delete lines
+// without calling any write API.
+//
+// The TTY/--yes confirmation contract is owned by the CLI layer; by the
+// time EnforceRepo is called, the caller has already decided to proceed.
+func EnforceRepo(ctx context.Context, cfg *config.Config, org, repo string, backend gh.Backend, out io.Writer, opts EnforceOptions) (Result, error) {
+	o, ok := cfg.Org(org)
+	if !ok {
+		return Result{}, fmt.Errorf("org %q not found in config", org)
+	}
+	r, ok := o.PerRepo[repo]
+	if !ok {
+		return Result{}, fmt.Errorf("repo %q not found under org %q", repo, org)
+	}
+
+	intents := plan.ForRepo(repo, r)
+
+	var resolved map[string]string
+	if !opts.DryRun {
+		var err error
+		resolved, err = resolveAll(intents)
+		if err != nil {
+			return Result{}, err
+		}
+	}
+
+	desiredVars := map[string]string{}
+	for _, in := range intents {
+		if in.Kind == plan.KindVar && in.Action == plan.ActionManaged {
+			desiredVars[in.Name] = resolved[entryKey(in)]
+		}
+	}
+
+	live, err := fetchLive(ctx, backend, org, repo)
+	if err != nil {
+		return Result{}, err
+	}
+	entries := diff.Compute(repo, intents, desiredVars, live, r.Ignored)
+
+	if !opts.DryRun && opts.Confirm != nil {
+		extras := make([]string, 0)
+		for _, e := range entries {
+			if e.Status == diff.Extra {
+				extras = append(extras, fmt.Sprintf("%s/%s", e.Kind, e.Name))
+			}
+		}
+		if !opts.Confirm(extras) {
+			return Result{}, nil
+		}
+	}
+
+	var actionsKey, depKey *gh.PublicKey
+	if !opts.DryRun {
+		actionsKey, depKey, err = fetchKeys(ctx, backend, org, repo, intents)
+		if err != nil {
+			return Result{}, err
+		}
+	}
+
+	fmt.Fprintf(out, "org: %s\nrepo: %s\n", org, repo)
+	res := Result{}
+	for _, in := range intents {
+		if in.Action != plan.ActionManaged {
+			continue
+		}
+		if opts.DryRun {
+			fmt.Fprintf(out, "  %s/%s: would-set\n", in.Kind, in.Name)
+			continue
+		}
+		if err := applyOne(ctx, backend, org, repo, in, resolved[entryKey(in)], actionsKey, depKey); err != nil {
+			res.Failed++
+			fmt.Fprintf(out, "  %s/%s: FAILED: %v\n", in.Kind, in.Name, err)
+			continue
+		}
+		fmt.Fprintf(out, "  %s/%s: ok\n", in.Kind, in.Name)
+	}
+
+	for _, e := range entries {
+		if e.Status != diff.Extra {
+			continue
+		}
+		if opts.DryRun {
+			fmt.Fprintf(out, "  %s/%s: would-delete\n", e.Kind, e.Name)
+			continue
+		}
+		if err := deleteOne(ctx, backend, org, repo, e.Kind, e.Name); err != nil {
+			res.Failed++
+			fmt.Fprintf(out, "  %s/%s: FAILED: %v\n", e.Kind, e.Name, err)
+			continue
+		}
+		fmt.Fprintf(out, "  %s/%s: deleted\n", e.Kind, e.Name)
+	}
+
+	if res.Failed > 0 {
+		fmt.Fprintf(out, "summary: %d failed\n", res.Failed)
+	}
+	return res, nil
+}
+
+func deleteOne(ctx context.Context, backend gh.Backend, org, repo string, kind plan.Kind, name string) error {
+	switch kind {
+	case plan.KindVar:
+		return backend.DeleteRepoVariable(ctx, org, repo, name)
+	case plan.KindSecret:
+		return backend.DeleteRepoSecret(ctx, org, repo, name)
+	case plan.KindDependabot:
+		return backend.DeleteRepoDependabotSecret(ctx, org, repo, name)
+	}
+	return fmt.Errorf("unknown kind %q", kind)
+}
+
 // writeFile is a thin wrapper used by tests to materialize fixture YAML.
 func writeFile(path string, data []byte) error {
 	return os.WriteFile(path, data, 0o600)
