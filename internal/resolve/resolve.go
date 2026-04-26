@@ -24,6 +24,21 @@ func (e *FileError) Error() string {
 
 func (e *FileError) Unwrap() error { return e.Err }
 
+// EnvError reports an env-sourced entry whose env var is unset at the
+// point the resolver was asked for the value.
+//
+// Name is the entry's name (e.g., the secret/var name from YAML); Var is
+// the env var name the entry pointed at. Both are included so callers can
+// produce actionable error messages without re-wrapping.
+type EnvError struct {
+	Name string
+	Var  string
+}
+
+func (e *EnvError) Error() string {
+	return fmt.Sprintf("entry %q: env var %q not set", e.Name, e.Var)
+}
+
 // Resolve returns the concrete string value for the entry.
 //
 // `env:` resolution is intentionally lazy — callers invoke Resolve only when
@@ -46,7 +61,7 @@ func Resolve(e *config.Entry) (string, error) {
 	case e.Env != "":
 		v, ok := os.LookupEnv(e.Env)
 		if !ok {
-			return "", fmt.Errorf("env var %q not set", e.Env)
+			return "", &EnvError{Name: e.Name, Var: e.Env}
 		}
 		return v, nil
 	}

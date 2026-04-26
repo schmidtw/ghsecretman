@@ -626,6 +626,115 @@ func equalSorted(a, b []string) bool {
 	return true
 }
 
+// TestApplyRepo_EnvSource_OtherRepoUnsetEnvDoesNotAbort asserts the lazy
+// env-resolution contract: when --repo X targets a repo whose entries do
+// not reference an env var FOO, FOO being unset does not abort the run
+// even though some other repo in the same config references FOO.
+func TestApplyRepo_EnvSource_OtherRepoUnsetEnvDoesNotAbort(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V_ACME:
+              env: GHSM_TEST_ACME_SET
+      other:
+        managed:
+          vars:
+            V_OTHER:
+              env: GHSM_TEST_OTHER_NEVER_SET
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GHSM_TEST_ACME_SET", "acme-value")
+	// Note: GHSM_TEST_OTHER_NEVER_SET is intentionally never set.
+
+	be := &fakeBackend{}
+	var out bytes.Buffer
+	res, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &out)
+	if err != nil {
+		t.Fatalf("targeting acme should not require env vars referenced only by another repo, got: %v", err)
+	}
+	if res.Failed != 0 {
+		t.Errorf("expected zero failures, got %d", res.Failed)
+	}
+	if len(be.setVarCalls) != 1 || be.setVarCalls[0].name != "V_ACME" || be.setVarCalls[0].value != "acme-value" {
+		t.Errorf("unexpected set calls: %+v", be.setVarCalls)
+	}
+}
+
+func TestApplyRepo_EnvSource_TargetedUnsetEnvFails(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          secrets:
+            S_NEEDED:
+              env: GHSM_TEST_TARGETED_NEVER_SET
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = ApplyRepo(context.Background(), cfg, "example", "acme", &fakeBackend{}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("expected error when a targeted entry's env var is unset")
+	}
+	if !strings.Contains(err.Error(), "S_NEEDED") {
+		t.Errorf("error should mention the entry name; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "GHSM_TEST_TARGETED_NEVER_SET") {
+		t.Errorf("error should mention the env var name; got: %v", err)
+	}
+}
+
+func TestAuditRepo_EnvSource(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              env: GHSM_TEST_AUDIT_ENV
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GHSM_TEST_AUDIT_ENV", "live-side")
+
+	be := &fakeBackend{vars: map[string]string{"V": "live-side"}}
+	var out bytes.Buffer
+	res, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &out, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Drift {
+		t.Errorf("expected no drift; got:\n%s", out.String())
+	}
+}
+
 func TestAuditRepo_ShowIgnored(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

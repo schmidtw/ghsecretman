@@ -52,6 +52,7 @@ type Ignored struct {
 //
 // Exactly one of Value, Env, or File must be set.
 type Entry struct {
+	Name    string
 	Value   string
 	Env     string
 	File    string
@@ -227,7 +228,7 @@ func decodeEntries(baseDir, orgName, repoName, section string, n *yaml.Node) (ma
 }
 
 func decodeEntry(baseDir, repoName, section, name string, n *yaml.Node) (*Entry, error) {
-	e := &Entry{}
+	e := &Entry{Name: name}
 	for i := 0; i < len(n.Content); i += 2 {
 		k := n.Content[i].Value
 		v := n.Content[i+1]
