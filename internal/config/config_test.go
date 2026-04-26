@@ -418,3 +418,258 @@ func TestLoadFile_Missing(t *testing.T) {
 func contains(ss []string, s string) bool {
 	return slices.Contains(ss, s)
 }
+
+func TestLoad_OrgScope_Valid(t *testing.T) {
+	t.Parallel()
+
+	const yml = `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          ORG_VAR_ALL:
+            value: v
+          ORG_VAR_SEL:
+            value: w
+            scope: selected
+            repos:
+              - r1
+              - r2
+        secrets:
+          ORG_SEC:
+            value: s
+            scope: private
+        dependabot:
+          ORG_DEP:
+            env: ORG_DEP_VAR
+      ignored:
+        vars:
+          - IGNORED_ORG_VAR
+        secrets:
+          - IGNORED_ORG_SEC
+        dependabot:
+          - IGNORED_ORG_DEP
+`
+	cfg, err := LoadBytes([]byte(yml), "/c/secrets.yml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	org, ok := cfg.Org("example")
+	if !ok {
+		t.Fatalf("org example missing")
+	}
+	if org.OrgScope == nil {
+		t.Fatalf("OrgScope missing")
+	}
+	if got := org.OrgScope.Managed.Vars["ORG_VAR_ALL"]; got == nil {
+		t.Fatalf("ORG_VAR_ALL missing")
+	} else {
+		if got.Visibility != "all" {
+			t.Errorf("ORG_VAR_ALL visibility default: got %q want all", got.Visibility)
+		}
+		if got.Entry.Value != "v" {
+			t.Errorf("ORG_VAR_ALL value: got %q", got.Entry.Value)
+		}
+	}
+	sel := org.OrgScope.Managed.Vars["ORG_VAR_SEL"]
+	if sel == nil {
+		t.Fatalf("ORG_VAR_SEL missing")
+	}
+	if sel.Visibility != "selected" {
+		t.Errorf("ORG_VAR_SEL visibility: got %q", sel.Visibility)
+	}
+	if !equalStrings(sel.Repos, []string{"r1", "r2"}) {
+		t.Errorf("ORG_VAR_SEL repos: got %v", sel.Repos)
+	}
+	if v := org.OrgScope.Managed.Secrets["ORG_SEC"].Visibility; v != "private" {
+		t.Errorf("ORG_SEC visibility: got %q", v)
+	}
+	if v := org.OrgScope.Managed.Dependabot["ORG_DEP"].Entry.Env; v != "ORG_DEP_VAR" {
+		t.Errorf("ORG_DEP env: got %q", v)
+	}
+	if !contains(org.OrgScope.Ignored.Vars, "IGNORED_ORG_VAR") {
+		t.Errorf("ignored vars missing IGNORED_ORG_VAR: %v", org.OrgScope.Ignored.Vars)
+	}
+	if !contains(org.OrgScope.Ignored.Secrets, "IGNORED_ORG_SEC") {
+		t.Errorf("ignored secrets missing IGNORED_ORG_SEC")
+	}
+	if !contains(org.OrgScope.Ignored.Dependabot, "IGNORED_ORG_DEP") {
+		t.Errorf("ignored dependabot missing IGNORED_ORG_DEP")
+	}
+}
+
+func TestLoad_OrgScope_Invalid(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		yml       string
+		errSubstr string
+	}{
+		{
+			name: "selected without repos",
+			yml: `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          V:
+            value: x
+            scope: selected
+`,
+			errSubstr: "selected",
+		},
+		{
+			name: "selected with empty repos",
+			yml: `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          V:
+            value: x
+            scope: selected
+            repos: []
+`,
+			errSubstr: "selected",
+		},
+		{
+			name: "repos without selected",
+			yml: `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          V:
+            value: x
+            scope: all
+            repos:
+              - r1
+`,
+			errSubstr: "repos",
+		},
+		{
+			name: "repos at default scope",
+			yml: `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          V:
+            value: x
+            repos:
+              - r1
+`,
+			errSubstr: "repos",
+		},
+		{
+			name: "invalid scope value",
+			yml: `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          V:
+            value: x
+            scope: bogus
+`,
+			errSubstr: "scope",
+		},
+		{
+			name: "unknown key in org entry",
+			yml: `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          V:
+            value: x
+            bogus: 1
+`,
+			errSubstr: "unknown",
+		},
+		{
+			name: "unknown key in org block",
+			yml: `
+github.com:
+  example:
+    org:
+      bogus: {}
+`,
+			errSubstr: "unknown",
+		},
+		{
+			name: "scope on per-repo entry rejected",
+			yml: `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              value: x
+              scope: all
+`,
+			errSubstr: "unknown",
+		},
+		{
+			name: "managed/ignored conflict in org",
+			yml: `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          DUP:
+            value: x
+      ignored:
+        vars:
+          - DUP
+`,
+			errSubstr: "DUP",
+		},
+		{
+			name: "scalar shorthand in org",
+			yml: `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          V: bar
+`,
+			errSubstr: "object form",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := LoadBytes([]byte(tc.yml), "/c/secrets.yml")
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.errSubstr)
+			}
+			if !strings.Contains(err.Error(), tc.errSubstr) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.errSubstr)
+			}
+		})
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

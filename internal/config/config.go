@@ -25,10 +25,36 @@ func (c *Config) Org(name string) (*Org, bool) {
 
 // Org holds per-organization configuration.
 type Org struct {
+	// OrgScope, when set, holds values written at the GitHub organization
+	// level (separate object class from repo-level secrets/variables).
+	OrgScope *OrgScope
 	// AllRepos, when set, holds values to fan out to every repo in the org.
 	// Per-repo entries override or shield individual repos.
 	AllRepos *Repo
 	PerRepo  map[string]*Repo
+}
+
+// OrgScope holds the org-level managed/ignored blocks.
+type OrgScope struct {
+	Managed OrgManaged
+	Ignored Ignored
+}
+
+// OrgManaged lists org-level values the tool owns and may write.
+type OrgManaged struct {
+	Vars       map[string]*OrgEntry
+	Secrets    map[string]*OrgEntry
+	Dependabot map[string]*OrgEntry
+}
+
+// OrgEntry describes one org-managed value with its visibility envelope.
+type OrgEntry struct {
+	Entry *Entry
+	// Visibility is one of "all", "private", "selected". Default: "all".
+	Visibility string
+	// Repos is the static list of repo names that may access the entry when
+	// Visibility == "selected". Required iff Visibility == "selected".
+	Repos []string
 }
 
 // Repo holds per-repo configuration.
@@ -145,13 +171,192 @@ func decodeOrg(baseDir, orgName string, n *yaml.Node) (*Org, error) {
 			}
 			org.AllRepos = repo
 		case "org":
-			// Out of scope for this slice; reserved for future slices.
-			return nil, fmt.Errorf("org %q: scope %q not yet supported", orgName, key)
+			s, err := decodeOrgScope(baseDir, orgName, val)
+			if err != nil {
+				return nil, err
+			}
+			org.OrgScope = s
 		default:
 			return nil, fmt.Errorf("org %q: unknown key %q", orgName, key)
 		}
 	}
 	return org, nil
+}
+
+func decodeOrgScope(baseDir, orgName string, n *yaml.Node) (*OrgScope, error) {
+	if n.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("org %q: org must be a mapping", orgName)
+	}
+	s := &OrgScope{}
+	for i := 0; i < len(n.Content); i += 2 {
+		key := n.Content[i].Value
+		val := n.Content[i+1]
+		switch key {
+		case "managed":
+			m, err := decodeOrgManaged(baseDir, orgName, val)
+			if err != nil {
+				return nil, err
+			}
+			s.Managed = m
+		case "ignored":
+			ig, err := decodeIgnored(fmt.Sprintf("org %q", orgName), val)
+			if err != nil {
+				return nil, err
+			}
+			s.Ignored = ig
+		default:
+			return nil, fmt.Errorf("org %q: org: unknown key %q", orgName, key)
+		}
+	}
+	if err := checkOrgManagedIgnoredConflict(orgName, s); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func checkOrgManagedIgnoredConflict(orgName string, s *OrgScope) error {
+	conflicts := []struct {
+		section string
+		managed map[string]*OrgEntry
+		ignored []string
+	}{
+		{"vars", s.Managed.Vars, s.Ignored.Vars},
+		{"secrets", s.Managed.Secrets, s.Ignored.Secrets},
+		{"dependabot", s.Managed.Dependabot, s.Ignored.Dependabot},
+	}
+	for _, c := range conflicts {
+		for _, name := range c.ignored {
+			if _, ok := c.managed[name]; ok {
+				return fmt.Errorf("org %q: %q appears in both org.managed.%s and org.ignored.%s",
+					orgName, name, c.section, c.section)
+			}
+		}
+	}
+	return nil
+}
+
+// decodeOrgManaged parses the org-level managed block.
+//
+//nolint:dupl // structurally similar to decodeManaged but produces OrgManaged
+// (whose entries carry visibility/repos) rather than Managed.
+func decodeOrgManaged(baseDir, orgName string, n *yaml.Node) (OrgManaged, error) {
+	var m OrgManaged
+	if n.Kind != yaml.MappingNode {
+		return m, fmt.Errorf("org %q: org.managed must be a mapping", orgName)
+	}
+	for i := 0; i < len(n.Content); i += 2 {
+		key := n.Content[i].Value
+		val := n.Content[i+1]
+		switch key {
+		case "vars":
+			es, err := decodeOrgEntries(baseDir, orgName, "vars", val)
+			if err != nil {
+				return m, err
+			}
+			m.Vars = es
+		case "secrets":
+			es, err := decodeOrgEntries(baseDir, orgName, "secrets", val)
+			if err != nil {
+				return m, err
+			}
+			m.Secrets = es
+		case "dependabot":
+			es, err := decodeOrgEntries(baseDir, orgName, "dependabot", val)
+			if err != nil {
+				return m, err
+			}
+			m.Dependabot = es
+		default:
+			return m, fmt.Errorf("org %q: org.managed: unknown key %q", orgName, key)
+		}
+	}
+	return m, nil
+}
+
+func decodeOrgEntries(baseDir, orgName, section string, n *yaml.Node) (map[string]*OrgEntry, error) {
+	if n.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("org %q: org.managed.%s must be a mapping", orgName, section)
+	}
+	out := map[string]*OrgEntry{}
+	for i := 0; i < len(n.Content); i += 2 {
+		name := n.Content[i].Value
+		val := n.Content[i+1]
+		if val.Kind != yaml.MappingNode {
+			return nil, fmt.Errorf("org %q: org.managed.%s.%s must use object form (got scalar)", orgName, section, name)
+		}
+		oe, err := decodeOrgEntry(baseDir, orgName, section, name, val)
+		if err != nil {
+			return nil, err
+		}
+		out[name] = oe
+	}
+	return out, nil
+}
+
+func decodeOrgEntry(baseDir, orgName, section, name string, n *yaml.Node) (*OrgEntry, error) {
+	e := &Entry{Name: name}
+	oe := &OrgEntry{Entry: e}
+	hasScope := false
+	for i := 0; i < len(n.Content); i += 2 {
+		k := n.Content[i].Value
+		v := n.Content[i+1]
+		switch k {
+		case "value":
+			e.HasValue = true
+			e.Value = v.Value
+		case "env":
+			e.Env = v.Value
+		case "file":
+			e.File = v.Value
+			if v.Value != "" {
+				if filepath.IsAbs(v.Value) {
+					e.FileAbs = filepath.Clean(v.Value)
+				} else {
+					e.FileAbs = filepath.Clean(filepath.Join(baseDir, v.Value))
+				}
+			}
+		case "scope":
+			hasScope = true
+			oe.Visibility = v.Value
+		case "repos":
+			list, err := decodeStringList(fmt.Sprintf("org %q", orgName), "org.managed."+section+"."+name+".repos", v)
+			if err != nil {
+				return nil, err
+			}
+			oe.Repos = list
+		default:
+			return nil, fmt.Errorf("org %q: org.managed.%s.%s: unknown key %q", orgName, section, name, k)
+		}
+	}
+	if err := validateEntrySources(fmt.Sprintf("org %q", orgName), "org.managed."+section, name, e); err != nil {
+		return nil, err
+	}
+	if !hasScope {
+		oe.Visibility = "all"
+	}
+	if err := validateOrgVisibility(orgName, section, name, oe); err != nil {
+		return nil, err
+	}
+	return oe, nil
+}
+
+func validateOrgVisibility(orgName, section, name string, oe *OrgEntry) error {
+	switch oe.Visibility {
+	case "all", "private":
+		if len(oe.Repos) > 0 {
+			return fmt.Errorf("org %q: org.managed.%s.%s: repos may only be set when scope is %q",
+				orgName, section, name, "selected")
+		}
+	case "selected":
+		if len(oe.Repos) == 0 {
+			return fmt.Errorf("org %q: org.managed.%s.%s: scope %q requires a non-empty repos list",
+				orgName, section, name, "selected")
+		}
+	default:
+		return fmt.Errorf("org %q: org.managed.%s.%s: scope must be one of all|private|selected (got %q)",
+			orgName, section, name, oe.Visibility)
+	}
+	return nil
 }
 
 func decodeRepo(baseDir, repoName string, n *yaml.Node) (*Repo, error) {
@@ -170,7 +375,7 @@ func decodeRepo(baseDir, repoName string, n *yaml.Node) (*Repo, error) {
 			}
 			repo.Managed = m
 		case "ignored":
-			ig, err := decodeIgnored(repoName, val)
+			ig, err := decodeIgnored(fmt.Sprintf("repo %q", repoName), val)
 			if err != nil {
 				return nil, err
 			}
@@ -206,6 +411,11 @@ func checkManagedIgnoredConflict(repoName string, r *Repo) error {
 	return nil
 }
 
+// decodeManaged parses the repo-level managed block.
+//
+//nolint:dupl // structurally similar to decodeOrgManaged but produces a
+// different type (Managed vs OrgManaged). Refactoring across types adds more
+// indirection than it removes; the two are short and easy to read in place.
 func decodeManaged(baseDir, repoName string, n *yaml.Node) (Managed, error) {
 	var m Managed
 	if n.Kind != yaml.MappingNode {
@@ -284,13 +494,13 @@ func decodeEntry(baseDir, repoName, section, name string, n *yaml.Node) (*Entry,
 			return nil, fmt.Errorf("repo %q: managed.%s.%s: unknown key %q", repoName, section, name, k)
 		}
 	}
-	if err := validateEntrySources(repoName, section, name, e); err != nil {
+	if err := validateEntrySources(fmt.Sprintf("repo %q", repoName), "managed."+section, name, e); err != nil {
 		return nil, err
 	}
 	return e, nil
 }
 
-func validateEntrySources(repoName, section, name string, e *Entry) error {
+func validateEntrySources(ctx, section, name string, e *Entry) error {
 	count := 0
 	if e.HasValue {
 		count++
@@ -302,21 +512,21 @@ func validateEntrySources(repoName, section, name string, e *Entry) error {
 		count++
 	}
 	if count != 1 {
-		return fmt.Errorf("repo %q: managed.%s.%s: must set exactly one of value, env, file (got %d)",
-			repoName, section, name, count)
+		return fmt.Errorf("%s: %s.%s: must set exactly one of value, env, file (got %d)",
+			ctx, section, name, count)
 	}
 	return nil
 }
 
-func decodeIgnored(repoName string, n *yaml.Node) (Ignored, error) {
+func decodeIgnored(ctx string, n *yaml.Node) (Ignored, error) {
 	var ig Ignored
 	if n.Kind != yaml.MappingNode {
-		return ig, fmt.Errorf("repo %q: ignored must be a mapping", repoName)
+		return ig, fmt.Errorf("%s: ignored must be a mapping", ctx)
 	}
 	for i := 0; i < len(n.Content); i += 2 {
 		key := n.Content[i].Value
 		val := n.Content[i+1]
-		list, err := decodeStringList(repoName, "ignored."+key, val)
+		list, err := decodeStringList(ctx, "ignored."+key, val)
 		if err != nil {
 			return ig, err
 		}
@@ -328,20 +538,20 @@ func decodeIgnored(repoName string, n *yaml.Node) (Ignored, error) {
 		case "dependabot":
 			ig.Dependabot = list
 		default:
-			return ig, fmt.Errorf("repo %q: ignored: unknown key %q", repoName, key)
+			return ig, fmt.Errorf("%s: ignored: unknown key %q", ctx, key)
 		}
 	}
 	return ig, nil
 }
 
-func decodeStringList(repoName, ctx string, n *yaml.Node) ([]string, error) {
+func decodeStringList(ctx, what string, n *yaml.Node) ([]string, error) {
 	if n.Kind != yaml.SequenceNode {
-		return nil, fmt.Errorf("repo %q: %s must be a list of strings", repoName, ctx)
+		return nil, fmt.Errorf("%s: %s must be a list of strings", ctx, what)
 	}
 	out := make([]string, 0, len(n.Content))
 	for _, item := range n.Content {
 		if item.Kind != yaml.ScalarNode {
-			return nil, fmt.Errorf("repo %q: %s must be a list of strings", repoName, ctx)
+			return nil, fmt.Errorf("%s: %s must be a list of strings", ctx, what)
 		}
 		out = append(out, item.Value)
 	}

@@ -51,6 +51,36 @@ type fakeBackend struct {
 	setErr map[string]error
 	// delErr injects errors for specific (kind, name) pairs on delete.
 	delErr map[string]error
+
+	// Org-scope state.
+	orgVars       map[string]string
+	orgSecrets    []string
+	orgDependabot []string
+
+	orgActionsKeyErr     error
+	orgDependabotKeyErr  error
+	orgActionsKeyFetches int
+	orgDependabotKeyFetches int
+
+	setOrgVarCalls []setOrgVarCall
+	setOrgSecCalls []setOrgSecCall
+	setOrgDepCalls []setOrgSecCall
+	delOrgVarCalls []string
+	delOrgSecCalls []string
+	delOrgDepCalls []string
+
+	repoIDs    map[string]int64
+	repoIDsErr error
+}
+
+type setOrgVarCall struct {
+	name, value, visibility string
+	ids                     []int64
+}
+
+type setOrgSecCall struct {
+	name, plaintext, keyID, visibility string
+	ids                                []int64
 }
 
 type setVarCall struct {
@@ -171,6 +201,108 @@ func (f *fakeBackend) DeleteRepoDependabotSecret(_ context.Context, _, _, name s
 	}
 	f.delDepCalls = append(f.delDepCalls, name)
 	return nil
+}
+
+func (f *fakeBackend) ListOrgVariables(_ context.Context, _ string) (map[string]string, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.orgVars, nil
+}
+func (f *fakeBackend) ListOrgSecrets(_ context.Context, _ string) ([]string, error) {
+	return f.orgSecrets, f.err
+}
+func (f *fakeBackend) ListOrgDependabotSecrets(_ context.Context, _ string) ([]string, error) {
+	return f.orgDependabot, f.err
+}
+func (f *fakeBackend) GetOrgPublicKey(_ context.Context, _ string) (*gh.PublicKey, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.orgActionsKeyFetches++
+	if f.orgActionsKeyErr != nil {
+		return nil, f.orgActionsKeyErr
+	}
+	return &gh.PublicKey{KeyID: "key-org-actions", Key: "AAAA"}, nil
+}
+func (f *fakeBackend) GetOrgDependabotPublicKey(_ context.Context, _ string) (*gh.PublicKey, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.orgDependabotKeyFetches++
+	if f.orgDependabotKeyErr != nil {
+		return nil, f.orgDependabotKeyErr
+	}
+	return &gh.PublicKey{KeyID: "key-org-dep", Key: "BBBB"}, nil
+}
+func (f *fakeBackend) SetOrgVariable(_ context.Context, _, name, value, visibility string, ids []int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.setErr["org/vars/"+name]; ok {
+		return e
+	}
+	f.setOrgVarCalls = append(f.setOrgVarCalls, setOrgVarCall{name, value, visibility, append([]int64(nil), ids...)})
+	return nil
+}
+func (f *fakeBackend) SetOrgSecret(_ context.Context, _, name string, key *gh.PublicKey, plaintext, visibility string, ids []int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.setErr["org/secrets/"+name]; ok {
+		return e
+	}
+	keyID := ""
+	if key != nil {
+		keyID = key.KeyID
+	}
+	f.setOrgSecCalls = append(f.setOrgSecCalls, setOrgSecCall{name, plaintext, keyID, visibility, append([]int64(nil), ids...)})
+	return nil
+}
+func (f *fakeBackend) SetOrgDependabotSecret(_ context.Context, _, name string, key *gh.PublicKey, plaintext, visibility string, ids []int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.setErr["org/dependabot/"+name]; ok {
+		return e
+	}
+	keyID := ""
+	if key != nil {
+		keyID = key.KeyID
+	}
+	f.setOrgDepCalls = append(f.setOrgDepCalls, setOrgSecCall{name, plaintext, keyID, visibility, append([]int64(nil), ids...)})
+	return nil
+}
+func (f *fakeBackend) DeleteOrgVariable(_ context.Context, _, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.delErr["org/vars/"+name]; ok {
+		return e
+	}
+	f.delOrgVarCalls = append(f.delOrgVarCalls, name)
+	return nil
+}
+func (f *fakeBackend) DeleteOrgSecret(_ context.Context, _, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.delErr["org/secrets/"+name]; ok {
+		return e
+	}
+	f.delOrgSecCalls = append(f.delOrgSecCalls, name)
+	return nil
+}
+func (f *fakeBackend) DeleteOrgDependabotSecret(_ context.Context, _, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.delErr["org/dependabot/"+name]; ok {
+		return e
+	}
+	f.delOrgDepCalls = append(f.delOrgDepCalls, name)
+	return nil
+}
+func (f *fakeBackend) GetRepoID(_ context.Context, _, repo string) (int64, error) {
+	if f.repoIDsErr != nil {
+		return 0, f.repoIDsErr
+	}
+	if id, ok := f.repoIDs[repo]; ok {
+		return id, nil
+	}
+	return 0, errors.New("repo id not found: " + repo)
 }
 
 func TestAuditRepo_Drift(t *testing.T) {
@@ -2041,6 +2173,485 @@ github.com:
 	if !strings.Contains(out.String(), "summary: ok=3 skipped=0 failed=0") {
 		t.Errorf("summary line missing or wrong; got:\n%s", out.String())
 	}
+}
+
+func TestAuditOrgScope_NoOrgBlockIsNoop(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              value: ok
+`)
+	be := &fakeBackend{}
+	var out bytes.Buffer
+	res, err := AuditOrgScope(context.Background(), cfg, "example", be, &out, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Drift {
+		t.Errorf("no-op should not report drift")
+	}
+	if out.Len() != 0 {
+		t.Errorf("no-op should not write output: %q", out.String())
+	}
+}
+
+func TestAuditOrgScope_DriftFromMissingAndMismatch(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          V_OK:
+            value: same
+        secrets:
+          S_HERE:
+            value: x
+        dependabot:
+          D_GONE:
+            value: y
+`)
+	be := &fakeBackend{
+		orgVars:       map[string]string{"V_OK": "same", "EXTRA": "stray"},
+		orgSecrets:    []string{"S_HERE"},
+		orgDependabot: []string{},
+	}
+	var out bytes.Buffer
+	res, err := AuditOrgScope(context.Background(), cfg, "example", be, &out, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.Drift {
+		t.Errorf("expected drift (D_GONE missing, EXTRA extra)")
+	}
+	o := out.String()
+	if !strings.Contains(o, "org: example") || !strings.Contains(o, "scope: org") {
+		t.Errorf("missing stanza header: %q", o)
+	}
+	if !strings.Contains(o, "vars/V_OK: match") {
+		t.Errorf("V_OK should match: %q", o)
+	}
+	if !strings.Contains(o, "vars/EXTRA: extra") {
+		t.Errorf("EXTRA should be reported: %q", o)
+	}
+	if !strings.Contains(o, "dependabot/D_GONE: missing") {
+		t.Errorf("D_GONE should be missing: %q", o)
+	}
+}
+
+func TestAuditOrgScope_UnknownOrg(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `github.com: {}`)
+	be := &fakeBackend{}
+	if _, err := AuditOrgScope(context.Background(), cfg, "ghost", be, &bytes.Buffer{}, false); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestAuditOrgScope_BackendError(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          V:
+            value: x
+`)
+	be := &fakeBackend{err: errors.New("boom")}
+	if _, err := AuditOrgScope(context.Background(), cfg, "example", be, &bytes.Buffer{}, false); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestApplyOrgScope_WritesVarsSecretsDependabot_WithVisibility(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          V_ALL:
+            value: vall
+          V_SEL:
+            value: vsel
+            scope: selected
+            repos:
+              - alpha
+              - beta
+        secrets:
+          S_PRIV:
+            value: secret
+            scope: private
+        dependabot:
+          D_ALL:
+            value: dep
+`)
+	be := &fakeBackend{
+		repoIDs: map[string]int64{"alpha": 1, "beta": 2},
+	}
+	var out bytes.Buffer
+	res, err := ApplyOrgScope(context.Background(), cfg, "example", be, &out)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Failed != 0 {
+		t.Errorf("Failed=%d", res.Failed)
+	}
+	if be.orgActionsKeyFetches != 1 {
+		t.Errorf("expected exactly 1 org actions key fetch; got %d", be.orgActionsKeyFetches)
+	}
+	if be.orgDependabotKeyFetches != 1 {
+		t.Errorf("expected exactly 1 org dependabot key fetch; got %d", be.orgDependabotKeyFetches)
+	}
+	if len(be.setOrgVarCalls) != 2 {
+		t.Errorf("expected 2 var calls; got %d", len(be.setOrgVarCalls))
+	}
+	for _, c := range be.setOrgVarCalls {
+		switch c.name {
+		case "V_ALL":
+			if c.visibility != "all" || len(c.ids) != 0 {
+				t.Errorf("V_ALL: %+v", c)
+			}
+		case "V_SEL":
+			if c.visibility != "selected" || !slices.Equal(c.ids, []int64{1, 2}) {
+				t.Errorf("V_SEL: %+v", c)
+			}
+		}
+	}
+	if len(be.setOrgSecCalls) != 1 || be.setOrgSecCalls[0].visibility != "private" {
+		t.Errorf("expected one secret with private visibility: %+v", be.setOrgSecCalls)
+	}
+	if be.setOrgSecCalls[0].keyID != "key-org-actions" {
+		t.Errorf("secret should use org actions key: %+v", be.setOrgSecCalls[0])
+	}
+	if len(be.setOrgDepCalls) != 1 || be.setOrgDepCalls[0].keyID != "key-org-dep" {
+		t.Errorf("expected one dependabot secret using org dep key: %+v", be.setOrgDepCalls)
+	}
+	if !strings.Contains(out.String(), "scope: org") {
+		t.Errorf("output missing org-scope header: %q", out.String())
+	}
+}
+
+func TestApplyOrgScope_VarsOnly_NoKeyFetch(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          V:
+            value: x
+`)
+	be := &fakeBackend{}
+	if _, err := ApplyOrgScope(context.Background(), cfg, "example", be, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if be.orgActionsKeyFetches != 0 || be.orgDependabotKeyFetches != 0 {
+		t.Errorf("expected no key fetches; actions=%d dep=%d",
+			be.orgActionsKeyFetches, be.orgDependabotKeyFetches)
+	}
+}
+
+func TestApplyOrgScope_RepoIDLookupError(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          V:
+            value: x
+            scope: selected
+            repos:
+              - missing
+`)
+	be := &fakeBackend{repoIDs: map[string]int64{}}
+	if _, err := ApplyOrgScope(context.Background(), cfg, "example", be, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected error from repo id lookup")
+	}
+}
+
+func TestApplyOrgScope_PerEntryFailureContinues(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          V_OK:
+            value: x
+          V_BAD:
+            value: y
+`)
+	be := &fakeBackend{
+		setErr: map[string]error{"org/vars/V_BAD": errors.New("boom")},
+	}
+	var out bytes.Buffer
+	res, err := ApplyOrgScope(context.Background(), cfg, "example", be, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Failed != 1 {
+		t.Errorf("Failed=%d want 1", res.Failed)
+	}
+	if !strings.Contains(out.String(), "vars/V_BAD: FAILED") {
+		t.Errorf("output missing FAILED: %q", out.String())
+	}
+}
+
+func TestApplyOrgScope_NoOrgBlockIsNoop(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `github.com: {example: {}}`)
+	be := &fakeBackend{}
+	var out bytes.Buffer
+	if _, err := ApplyOrgScope(context.Background(), cfg, "example", be, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("expected no output; got %q", out.String())
+	}
+}
+
+func TestApplyOrgScope_UnknownOrg(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `github.com: {}`)
+	if _, err := ApplyOrgScope(context.Background(), cfg, "ghost", &fakeBackend{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestEnforceOrgScope_DeletesExtras(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          KEEP:
+            value: k
+      ignored:
+        vars:
+          - LEAVE
+`)
+	be := &fakeBackend{
+		orgVars: map[string]string{"KEEP": "k", "EXTRA": "drop", "LEAVE": "alone"},
+	}
+	var out bytes.Buffer
+	res, err := EnforceOrgScope(context.Background(), cfg, "example", be, &out, EnforceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Failed != 0 {
+		t.Errorf("Failed=%d", res.Failed)
+	}
+	if !slices.Contains(be.delOrgVarCalls, "EXTRA") {
+		t.Errorf("EXTRA should have been deleted; got %v", be.delOrgVarCalls)
+	}
+	if slices.Contains(be.delOrgVarCalls, "LEAVE") {
+		t.Errorf("LEAVE is ignored; should not be deleted: %v", be.delOrgVarCalls)
+	}
+	if !strings.Contains(out.String(), "vars/EXTRA: deleted") {
+		t.Errorf("output missing deletion: %q", out.String())
+	}
+}
+
+func TestEnforceOrgScope_DryRunSkipsAllWrites(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          V:
+            value: x
+`)
+	be := &fakeBackend{orgVars: map[string]string{"EXTRA": "y"}}
+	var out bytes.Buffer
+	if _, err := EnforceOrgScope(context.Background(), cfg, "example", be, &out, EnforceOptions{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(be.setOrgVarCalls) != 0 || len(be.delOrgVarCalls) != 0 {
+		t.Errorf("dry-run should not write or delete; calls set=%v del=%v",
+			be.setOrgVarCalls, be.delOrgVarCalls)
+	}
+	if !strings.Contains(out.String(), "would-set") || !strings.Contains(out.String(), "would-delete") {
+		t.Errorf("dry-run output missing markers: %q", out.String())
+	}
+}
+
+func TestEnforceOrgScope_ConfirmFalseSkipsWrites(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          V:
+            value: x
+`)
+	be := &fakeBackend{orgVars: map[string]string{"EXTRA": "y"}}
+	calls := 0
+	confirm := func(extras []string) bool {
+		calls++
+		if !slices.Contains(extras, "vars/EXTRA") {
+			t.Errorf("confirm should receive EXTRA; got %v", extras)
+		}
+		return false
+	}
+	if _, err := EnforceOrgScope(context.Background(), cfg, "example", be, &bytes.Buffer{}, EnforceOptions{Confirm: confirm}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Errorf("Confirm called %d times; want 1", calls)
+	}
+	if len(be.delOrgVarCalls) != 0 || len(be.setOrgVarCalls) != 0 {
+		t.Errorf("denied confirm should suppress writes; got set=%v del=%v",
+			be.setOrgVarCalls, be.delOrgVarCalls)
+	}
+}
+
+func TestEnforceOrgScope_NoOrgBlock(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `github.com: {example: {}}`)
+	be := &fakeBackend{}
+	var out bytes.Buffer
+	if _, err := EnforceOrgScope(context.Background(), cfg, "example", be, &out, EnforceOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("expected no output; got %q", out.String())
+	}
+}
+
+func TestEnforceOrgScope_UnknownOrg(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `github.com: {}`)
+	if _, err := EnforceOrgScope(context.Background(), cfg, "ghost", &fakeBackend{}, &bytes.Buffer{}, EnforceOptions{}); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestAudit_IncludesOrgScopeStanza(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          ORG_VAR:
+            value: x
+    per-repo:
+      acme:
+        managed:
+          vars:
+            REPO_VAR:
+              value: y
+`)
+	be := &fakeBackend{
+		orgRepos: []string{"acme"},
+		vars:     map[string]string{"REPO_VAR": "y"},
+		orgVars:  map[string]string{"ORG_VAR": "x"},
+	}
+	var out bytes.Buffer
+	res, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{Concurrency: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Drift {
+		t.Errorf("expected no drift")
+	}
+	o := out.String()
+	if !strings.Contains(o, "scope: org") {
+		t.Errorf("output missing org scope stanza: %q", o)
+	}
+	if !strings.Contains(o, "repo: acme") {
+		t.Errorf("output missing repo stanza: %q", o)
+	}
+}
+
+func TestApply_IncludesOrgScope(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          ORG_VAR:
+            value: x
+    per-repo:
+      acme:
+        managed:
+          vars:
+            REPO_VAR:
+              value: y
+`)
+	be := &fakeBackend{orgRepos: []string{"acme"}}
+	var out bytes.Buffer
+	if _, err := Apply(context.Background(), cfg, "example", be, &out, OrgOptions{Concurrency: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if len(be.setOrgVarCalls) != 1 || be.setOrgVarCalls[0].name != "ORG_VAR" {
+		t.Errorf("expected ORG_VAR set call; got %+v", be.setOrgVarCalls)
+	}
+	if len(be.setVarCalls) != 1 || be.setVarCalls[0].name != "REPO_VAR" {
+		t.Errorf("expected REPO_VAR set call; got %+v", be.setVarCalls)
+	}
+}
+
+func TestEnforce_IncludesOrgScope(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          KEEP:
+            value: k
+`)
+	be := &fakeBackend{
+		orgRepos: []string{},
+		orgVars:  map[string]string{"KEEP": "k", "EXTRA": "drop"},
+	}
+	var out bytes.Buffer
+	if _, err := Enforce(context.Background(), cfg, "example", be, &out, EnforceOptions{Concurrency: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(be.delOrgVarCalls, "EXTRA") {
+		t.Errorf("expected EXTRA org-level delete: %v", be.delOrgVarCalls)
+	}
+}
+
+func mustLoadCfg(t *testing.T, body string) *config.Config {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(p, []byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
 }
 
 func TestEnforce_AtomicOutputDryRun(t *testing.T) {

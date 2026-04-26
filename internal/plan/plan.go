@@ -45,6 +45,19 @@ type Intent struct {
 	// all-repos.managed and the per-repo entry took precedence. Reserved for
 	// audit-side override reporting; runtime behavior is unaffected.
 	OverridesAllRepos bool
+
+	// IsOrg distinguishes an org-level intent (different GitHub object class)
+	// from a repo-level intent. When true, Repo is empty and the entry is
+	// targeted at the named organization.
+	IsOrg bool
+
+	// Visibility is the org-level secret/variable visibility envelope and is
+	// only meaningful when IsOrg is true. One of "all", "private", "selected".
+	Visibility string
+
+	// SelectedRepos is the static list of repo names that may access the
+	// entry; only populated when IsOrg && Visibility == "selected".
+	SelectedRepos []string
 }
 
 // ForRepo returns intents for every managed entry on the repo plus a
@@ -219,6 +232,74 @@ func stringSet(ss []string) map[string]struct{} {
 		out[s] = struct{}{}
 	}
 	return out
+}
+
+// ForOrg returns intents for an org-level scope.
+//
+// Org intents are a different GitHub object class than repo intents (org
+// secrets/vars/dependabot live on the organization, not on a repo) and are
+// therefore returned with IsOrg=true and Repo="". The cascade rules between
+// per-repo / all-repos / org operate on repo-level objects only — org-scope
+// intents do not collide with repo-scope intents.
+//
+// Output order is stable: section order vars, secrets, dependabot;
+// within each section, managed names sorted, then ignored names sorted.
+func ForOrg(s *config.OrgScope) []Intent {
+	if s == nil {
+		return nil
+	}
+	out := make([]Intent, 0)
+	out = appendOrgKind(out, KindVar, s.Managed.Vars, s.Ignored.Vars)
+	out = appendOrgKind(out, KindSecret, s.Managed.Secrets, s.Ignored.Secrets)
+	out = appendOrgKind(out, KindDependabot, s.Managed.Dependabot, s.Ignored.Dependabot)
+	return out
+}
+
+func appendOrgKind(out []Intent, kind Kind, m map[string]*config.OrgEntry, ignored []string) []Intent {
+	names := make([]string, 0, len(m))
+	for n := range m {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		oe := m[n]
+		out = append(out, Intent{
+			Kind:          kind,
+			Name:          n,
+			Action:        ActionManaged,
+			Entry:         oe.Entry,
+			IsOrg:         true,
+			Visibility:    oe.Visibility,
+			SelectedRepos: append([]string(nil), oe.Repos...),
+		})
+	}
+	ig := append([]string(nil), ignored...)
+	sort.Strings(ig)
+	for _, n := range ig {
+		out = append(out, Intent{
+			Kind:   kind,
+			Name:   n,
+			Action: ActionIgnored,
+			IsOrg:  true,
+		})
+	}
+	return out
+}
+
+// EffectiveOrgIgnored returns the org-level ignored list (no cascade).
+//
+// Useful for downstream code that needs an ignored set for marking extras at
+// the org scope. Unlike repo-scope ignored, there is no cascade across scope
+// classes; org.ignored applies only to the org-level GitHub object.
+func EffectiveOrgIgnored(s *config.OrgScope) config.Ignored {
+	if s == nil {
+		return config.Ignored{}
+	}
+	return config.Ignored{
+		Vars:       append([]string(nil), s.Ignored.Vars...),
+		Secrets:    append([]string(nil), s.Ignored.Secrets...),
+		Dependabot: append([]string(nil), s.Ignored.Dependabot...),
+	}
 }
 
 // EffectiveIgnored returns the cascaded ignored list at a single repo.
