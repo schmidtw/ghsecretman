@@ -5,15 +5,21 @@ package github
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	gogithub "github.com/google/go-github/v85/github"
+	"golang.org/x/crypto/nacl/box"
 )
 
 func TestClient_ListRepoVariables(t *testing.T) {
@@ -111,6 +117,342 @@ func TestNewClientFromEnv_NoToken(t *testing.T) {
 	if _, err := NewClientFromEnv(); err == nil {
 		t.Fatal("expected error when no token set")
 	}
+}
+
+func TestClient_GetRepoPublicKey(t *testing.T) {
+	t.Parallel()
+	srv, c := newTestClient(t, map[string]string{
+		"/repos/example/acme/actions/secrets/public-key": `{"key_id":"kid-actions","key":"AAAA"}`,
+	})
+	defer srv.Close()
+
+	pk, err := c.GetRepoPublicKey(context.Background(), "example", "acme")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pk.KeyID != "kid-actions" || pk.Key != "AAAA" {
+		t.Fatalf("got %+v", pk)
+	}
+}
+
+func TestClient_GetRepoDependabotPublicKey(t *testing.T) {
+	t.Parallel()
+	srv, c := newTestClient(t, map[string]string{
+		"/repos/example/acme/dependabot/secrets/public-key": `{"key_id":"kid-dep","key":"BBBB"}`,
+	})
+	defer srv.Close()
+
+	pk, err := c.GetRepoDependabotPublicKey(context.Background(), "example", "acme")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pk.KeyID != "kid-dep" || pk.Key != "BBBB" {
+		t.Fatalf("got %+v", pk)
+	}
+}
+
+func TestClient_GetRepoPublicKey_Error(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"nope"}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+	if _, err := c.GetRepoPublicKey(context.Background(), "example", "acme"); err == nil {
+		t.Fatal("expected error")
+	}
+	if _, err := c.GetRepoDependabotPublicKey(context.Background(), "example", "acme"); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestClient_SetRepoVariable_Update(t *testing.T) {
+	t.Parallel()
+	var got struct {
+		method string
+		path   string
+		body   map[string]any
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.method = r.Method
+		got.path = r.URL.Path
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &got.body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+
+	if err := c.SetRepoVariable(context.Background(), "example", "acme", "V", "ok"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.method != http.MethodPatch {
+		t.Errorf("method: got %s want PATCH", got.method)
+	}
+	if got.path != "/repos/example/acme/actions/variables/V" {
+		t.Errorf("path: %s", got.path)
+	}
+	if got.body["name"] != "V" || got.body["value"] != "ok" {
+		t.Errorf("body: %+v", got.body)
+	}
+}
+
+func TestClient_SetRepoVariable_CreateFallback(t *testing.T) {
+	t.Parallel()
+	var (
+		mu    sync.Mutex
+		calls []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		if r.Method == http.MethodPatch {
+			http.Error(w, `{"message":"not found"}`, http.StatusNotFound)
+			return
+		}
+		// POST creates
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+
+	if err := c.SetRepoVariable(context.Background(), "example", "acme", "V", "ok"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{
+		"PATCH /repos/example/acme/actions/variables/V",
+		"POST /repos/example/acme/actions/variables",
+	}
+	if strings.Join(calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls: %v want %v", calls, want)
+	}
+}
+
+func TestClient_SetRepoVariable_UpdateError(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"server"}`, http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+	if err := c.SetRepoVariable(context.Background(), "example", "acme", "V", "ok"); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestClient_SetRepoVariable_CreateError(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			http.Error(w, `{"message":"not found"}`, http.StatusNotFound)
+			return
+		}
+		http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+	if err := c.SetRepoVariable(context.Background(), "example", "acme", "V", "ok"); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestClient_SetRepoSecret_EncryptsAndPuts(t *testing.T) {
+	t.Parallel()
+	pub, priv := genBoxKeypair(t)
+	pubB64 := base64.StdEncoding.EncodeToString(pub[:])
+
+	var captured struct {
+		method, path string
+		body         map[string]any
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.method = r.Method
+		captured.path = r.URL.Path
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &captured.body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+
+	err := c.SetRepoSecret(context.Background(), "example", "acme", "S",
+		&PublicKey{KeyID: "kid", Key: pubB64}, "plain-text-value")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if captured.method != http.MethodPut {
+		t.Errorf("method: %s", captured.method)
+	}
+	if captured.path != "/repos/example/acme/actions/secrets/S" {
+		t.Errorf("path: %s", captured.path)
+	}
+	if captured.body["key_id"] != "kid" {
+		t.Errorf("key_id: %v", captured.body["key_id"])
+	}
+	encB64, _ := captured.body["encrypted_value"].(string)
+	if encB64 == "" {
+		t.Fatalf("encrypted_value missing in body: %+v", captured.body)
+	}
+	plain := decryptSealedBox(t, encB64, pub, priv)
+	if plain != "plain-text-value" {
+		t.Errorf("decrypted: got %q want %q", plain, "plain-text-value")
+	}
+}
+
+func TestClient_SetRepoSecret_NilKey(t *testing.T) {
+	t.Parallel()
+	c := newClientPointingAt(t, "http://127.0.0.1:0")
+	if err := c.SetRepoSecret(context.Background(), "example", "acme", "S", nil, "v"); err == nil {
+		t.Fatal("expected error for nil key")
+	}
+}
+
+func TestClient_SetRepoSecret_BadKey(t *testing.T) {
+	t.Parallel()
+	c := newClientPointingAt(t, "http://127.0.0.1:0")
+	err := c.SetRepoSecret(context.Background(), "example", "acme", "S",
+		&PublicKey{KeyID: "kid", Key: "not-base64!!!"}, "v")
+	if err == nil {
+		t.Fatal("expected error for bad public key")
+	}
+}
+
+func TestClient_SetRepoSecret_APIError(t *testing.T) {
+	t.Parallel()
+	pub, _ := genBoxKeypair(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"nope"}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+	err := c.SetRepoSecret(context.Background(), "example", "acme", "S",
+		&PublicKey{KeyID: "kid", Key: base64.StdEncoding.EncodeToString(pub[:])}, "v")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestClient_SetRepoDependabotSecret_EncryptsAndPuts(t *testing.T) {
+	t.Parallel()
+	pub, priv := genBoxKeypair(t)
+	pubB64 := base64.StdEncoding.EncodeToString(pub[:])
+
+	var captured struct {
+		method, path string
+		body         map[string]any
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.method = r.Method
+		captured.path = r.URL.Path
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &captured.body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+
+	err := c.SetRepoDependabotSecret(context.Background(), "example", "acme", "D",
+		&PublicKey{KeyID: "kid-dep", Key: pubB64}, "dep-secret")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if captured.method != http.MethodPut {
+		t.Errorf("method: %s", captured.method)
+	}
+	if captured.path != "/repos/example/acme/dependabot/secrets/D" {
+		t.Errorf("path: %s", captured.path)
+	}
+	if captured.body["key_id"] != "kid-dep" {
+		t.Errorf("key_id: %v", captured.body["key_id"])
+	}
+	encB64, _ := captured.body["encrypted_value"].(string)
+	if encB64 == "" {
+		t.Fatalf("encrypted_value missing: %+v", captured.body)
+	}
+	plain := decryptSealedBox(t, encB64, pub, priv)
+	if plain != "dep-secret" {
+		t.Errorf("decrypted: got %q", plain)
+	}
+}
+
+func TestClient_SetRepoDependabotSecret_NilKey(t *testing.T) {
+	t.Parallel()
+	c := newClientPointingAt(t, "http://127.0.0.1:0")
+	if err := c.SetRepoDependabotSecret(context.Background(), "example", "acme", "D", nil, "v"); err == nil {
+		t.Fatal("expected error for nil key")
+	}
+}
+
+func TestClient_SetRepoDependabotSecret_BadKey(t *testing.T) {
+	t.Parallel()
+	c := newClientPointingAt(t, "http://127.0.0.1:0")
+	err := c.SetRepoDependabotSecret(context.Background(), "example", "acme", "D",
+		&PublicKey{KeyID: "kid", Key: "not-base64!!!"}, "v")
+	if err == nil {
+		t.Fatal("expected error for bad public key")
+	}
+}
+
+func TestClient_SetRepoDependabotSecret_APIError(t *testing.T) {
+	t.Parallel()
+	pub, _ := genBoxKeypair(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"nope"}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+	err := c.SetRepoDependabotSecret(context.Background(), "example", "acme", "D",
+		&PublicKey{KeyID: "kid", Key: base64.StdEncoding.EncodeToString(pub[:])}, "v")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestSealAnonymous_Roundtrip(t *testing.T) {
+	t.Parallel()
+	pub, priv := genBoxKeypair(t)
+	encB64, err := sealAnonymous("hello world", base64.StdEncoding.EncodeToString(pub[:]))
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	plain := decryptSealedBox(t, encB64, pub, priv)
+	if plain != "hello world" {
+		t.Errorf("decrypt: %q", plain)
+	}
+}
+
+func TestSealAnonymous_BadKey(t *testing.T) {
+	t.Parallel()
+	if _, err := sealAnonymous("x", "not-base64!!"); err == nil {
+		t.Error("expected error for bad base64")
+	}
+	short := base64.StdEncoding.EncodeToString([]byte("short"))
+	if _, err := sealAnonymous("x", short); err == nil {
+		t.Error("expected error for wrong key length")
+	}
+}
+
+func genBoxKeypair(t *testing.T) (*[32]byte, *[32]byte) {
+	t.Helper()
+	pub, priv, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub, priv
+}
+
+func decryptSealedBox(t *testing.T, encB64 string, pub, priv *[32]byte) string {
+	t.Helper()
+	enc, err := base64.StdEncoding.DecodeString(encB64)
+	if err != nil {
+		t.Fatalf("decode encrypted: %v", err)
+	}
+	out, ok := box.OpenAnonymous(nil, enc, pub, priv)
+	if !ok {
+		t.Fatalf("OpenAnonymous failed")
+	}
+	return string(out)
 }
 
 func newTestClient(t *testing.T, responses map[string]string) (*httptest.Server, *Client) {

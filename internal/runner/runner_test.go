@@ -9,9 +9,11 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/schmidtw/ghsecretman/internal/config"
+	gh "github.com/schmidtw/ghsecretman/internal/github"
 )
 
 type fakeBackend struct {
@@ -19,6 +21,30 @@ type fakeBackend struct {
 	secrets    []string
 	dependabot []string
 	err        error
+
+	actionsKey    *gh.PublicKey
+	dependabotKey *gh.PublicKey
+
+	mu          sync.Mutex
+	setVarCalls []setVarCall
+	setSecCalls []setSecretCall
+	setDepCalls []setSecretCall
+
+	// keyFetchCount tracks how many times each key fetch endpoint was called.
+	actionsKeyFetches    int
+	dependabotKeyFetches int
+
+	// setErr injects errors for specific (kind, name) pairs.
+	setErr map[string]error
+}
+
+type setVarCall struct {
+	owner, repo, name, value string
+}
+
+type setSecretCall struct {
+	owner, repo, name, plaintext string
+	keyID                        string
 }
 
 func (f *fakeBackend) ListRepoVariables(_ context.Context, _, _ string) (map[string]string, error) {
@@ -32,6 +58,64 @@ func (f *fakeBackend) ListRepoSecrets(_ context.Context, _, _ string) ([]string,
 }
 func (f *fakeBackend) ListRepoDependabotSecrets(_ context.Context, _, _ string) ([]string, error) {
 	return f.dependabot, f.err
+}
+
+func (f *fakeBackend) GetRepoPublicKey(_ context.Context, _, _ string) (*gh.PublicKey, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actionsKeyFetches++
+	if f.actionsKey == nil {
+		return &gh.PublicKey{KeyID: "key-actions", Key: "AAAA"}, nil
+	}
+	return f.actionsKey, nil
+}
+
+func (f *fakeBackend) GetRepoDependabotPublicKey(_ context.Context, _, _ string) (*gh.PublicKey, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dependabotKeyFetches++
+	if f.dependabotKey == nil {
+		return &gh.PublicKey{KeyID: "key-dep", Key: "BBBB"}, nil
+	}
+	return f.dependabotKey, nil
+}
+
+func (f *fakeBackend) SetRepoVariable(_ context.Context, owner, repo, name, value string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.setErr["vars/"+name]; ok {
+		return e
+	}
+	f.setVarCalls = append(f.setVarCalls, setVarCall{owner, repo, name, value})
+	return nil
+}
+
+func (f *fakeBackend) SetRepoSecret(_ context.Context, owner, repo, name string, key *gh.PublicKey, plaintext string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.setErr["secrets/"+name]; ok {
+		return e
+	}
+	keyID := ""
+	if key != nil {
+		keyID = key.KeyID
+	}
+	f.setSecCalls = append(f.setSecCalls, setSecretCall{owner, repo, name, plaintext, keyID})
+	return nil
+}
+
+func (f *fakeBackend) SetRepoDependabotSecret(_ context.Context, owner, repo, name string, key *gh.PublicKey, plaintext string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.setErr["dependabot/"+name]; ok {
+		return e
+	}
+	keyID := ""
+	if key != nil {
+		keyID = key.KeyID
+	}
+	f.setDepCalls = append(f.setDepCalls, setSecretCall{owner, repo, name, plaintext, keyID})
+	return nil
 }
 
 func TestAuditRepo_Drift(t *testing.T) {

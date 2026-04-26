@@ -74,6 +74,10 @@ type fakeBackend struct {
 	vars       map[string]string
 	secrets    []string
 	dependabot []string
+
+	setVars       []string
+	setSecrets    []string
+	setDependabot []string
 }
 
 func (f *fakeBackend) ListRepoVariables(_ context.Context, _, _ string) (map[string]string, error) {
@@ -84,6 +88,29 @@ func (f *fakeBackend) ListRepoSecrets(_ context.Context, _, _ string) ([]string,
 }
 func (f *fakeBackend) ListRepoDependabotSecrets(_ context.Context, _, _ string) ([]string, error) {
 	return f.dependabot, nil
+}
+
+func (f *fakeBackend) GetRepoPublicKey(_ context.Context, _, _ string) (*gh.PublicKey, error) {
+	return &gh.PublicKey{KeyID: "kid", Key: "AAAA"}, nil
+}
+
+func (f *fakeBackend) GetRepoDependabotPublicKey(_ context.Context, _, _ string) (*gh.PublicKey, error) {
+	return &gh.PublicKey{KeyID: "kid-dep", Key: "BBBB"}, nil
+}
+
+func (f *fakeBackend) SetRepoVariable(_ context.Context, _, _, name, _ string) error {
+	f.setVars = append(f.setVars, name)
+	return nil
+}
+
+func (f *fakeBackend) SetRepoSecret(_ context.Context, _, _, name string, _ *gh.PublicKey, _ string) error {
+	f.setSecrets = append(f.setSecrets, name)
+	return nil
+}
+
+func (f *fakeBackend) SetRepoDependabotSecret(_ context.Context, _, _, name string, _ *gh.PublicKey, _ string) error {
+	f.setDependabot = append(f.setDependabot, name)
+	return nil
 }
 
 func writeCfg(t *testing.T, dir, body string) string {
