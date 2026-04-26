@@ -28,6 +28,9 @@ const (
 	// ActionManaged means the entry is in the managed block — apply/audit
 	// against it.
 	ActionManaged Action = "managed"
+	// ActionIgnored means the name appears in the ignored block at this
+	// scope — skip it for both apply and audit-output.
+	ActionIgnored Action = "ignored"
 )
 
 // Intent is one (target, kind, name) action with its source entry.
@@ -39,22 +42,23 @@ type Intent struct {
 	Entry  *config.Entry
 }
 
-// ForRepo returns intents for every managed entry on the repo.
+// ForRepo returns intents for every managed entry on the repo plus a
+// skip-intent for every name in the ignored block.
 //
 // Output order is stable: section order vars, secrets, dependabot;
-// names sorted within each section.
+// within each section, managed names sorted, then ignored names sorted.
 func ForRepo(repo string, r *config.Repo) []Intent {
 	if r == nil {
 		return nil
 	}
 	out := make([]Intent, 0)
-	out = appendKind(out, repo, KindVar, r.Managed.Vars)
-	out = appendKind(out, repo, KindSecret, r.Managed.Secrets)
-	out = appendKind(out, repo, KindDependabot, r.Managed.Dependabot)
+	out = appendKind(out, repo, KindVar, r.Managed.Vars, r.Ignored.Vars)
+	out = appendKind(out, repo, KindSecret, r.Managed.Secrets, r.Ignored.Secrets)
+	out = appendKind(out, repo, KindDependabot, r.Managed.Dependabot, r.Ignored.Dependabot)
 	return out
 }
 
-func appendKind(out []Intent, repo string, kind Kind, m map[string]*config.Entry) []Intent {
+func appendKind(out []Intent, repo string, kind Kind, m map[string]*config.Entry, ignored []string) []Intent {
 	names := make([]string, 0, len(m))
 	for n := range m {
 		names = append(names, n)
@@ -67,6 +71,16 @@ func appendKind(out []Intent, repo string, kind Kind, m map[string]*config.Entry
 			Name:   n,
 			Action: ActionManaged,
 			Entry:  m[n],
+		})
+	}
+	ig := append([]string(nil), ignored...)
+	sort.Strings(ig)
+	for _, n := range ig {
+		out = append(out, Intent{
+			Repo:   repo,
+			Kind:   kind,
+			Name:   n,
+			Action: ActionIgnored,
 		})
 	}
 	return out

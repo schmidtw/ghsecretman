@@ -36,12 +36,21 @@ func TestForRepo(t *testing.T) {
 	got := summarize(intents)
 	want := []string{
 		"acme/dependabot/D1/managed",
+		"acme/dependabot/IGD/ignored",
+		"acme/secrets/IGS/ignored",
 		"acme/secrets/S1/managed",
+		"acme/vars/IGV/ignored",
 		"acme/vars/V1/managed",
 		"acme/vars/V2/managed",
 	}
 	if !equal(got, want) {
 		t.Fatalf("intents:\ngot  %v\nwant %v", got, want)
+	}
+
+	for _, in := range intents {
+		if in.Action == ActionIgnored && in.Entry != nil {
+			t.Errorf("ignored intent should have nil Entry; got %+v", in)
+		}
 	}
 
 	if !IsIgnored(repo, KindVar, "IGV") {
