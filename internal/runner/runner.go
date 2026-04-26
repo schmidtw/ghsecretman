@@ -30,17 +30,16 @@ type Result struct {
 
 // AuditRepo runs an audit against a single repo and writes a labeled
 // stanza to out. showIgnored controls whether ignored entries appear.
+//
+// The repo is resolved via the per-repo > all-repos cascade. A repo with
+// no per-repo block is still valid as long as the org defines all-repos.
 func AuditRepo(ctx context.Context, cfg *config.Config, org, repo string, backend gh.Backend, out io.Writer, showIgnored bool) (Result, error) {
-	o, ok := cfg.Org(org)
-	if !ok {
-		return Result{}, fmt.Errorf("org %q not found in config", org)
-	}
-	r, ok := o.PerRepo[repo]
-	if !ok {
-		return Result{}, fmt.Errorf("repo %q not found under org %q", repo, org)
+	o, perRepo, err := lookupTarget(cfg, org, repo)
+	if err != nil {
+		return Result{}, err
 	}
 
-	intents := plan.ForRepo(repo, r)
+	intents := plan.ForRepoCascade(repo, o.AllRepos, perRepo)
 
 	desiredVars, err := resolveVars(intents)
 	if err != nil {
@@ -52,10 +51,23 @@ func AuditRepo(ctx context.Context, cfg *config.Config, org, repo string, backen
 		return Result{}, err
 	}
 
-	entries := diff.Compute(repo, intents, desiredVars, live, r.Ignored)
+	effIgnored := plan.EffectiveIgnored(o.AllRepos, perRepo)
+	entries := diff.Compute(repo, intents, desiredVars, live, effIgnored)
 	writeStanza(out, org, repo, entries, showIgnored)
 
 	return Result{Drift: diff.HasDrift(entries)}, nil
+}
+
+func lookupTarget(cfg *config.Config, org, repo string) (*config.Org, *config.Repo, error) {
+	o, ok := cfg.Org(org)
+	if !ok {
+		return nil, nil, fmt.Errorf("org %q not found in config", org)
+	}
+	perRepo := o.PerRepo[repo]
+	if perRepo == nil && o.AllRepos == nil {
+		return nil, nil, fmt.Errorf("repo %q not found under org %q", repo, org)
+	}
+	return o, perRepo, nil
 }
 
 func resolveVars(intents []plan.Intent) (map[string]string, error) {
@@ -113,16 +125,12 @@ func writeStanza(out io.Writer, org, repo string, entries []diff.Entry, showIgno
 // per call (only when the corresponding section has at least one entry)
 // and reused across all set calls.
 func ApplyRepo(ctx context.Context, cfg *config.Config, org, repo string, backend gh.Backend, out io.Writer) (Result, error) {
-	o, ok := cfg.Org(org)
-	if !ok {
-		return Result{}, fmt.Errorf("org %q not found in config", org)
-	}
-	r, ok := o.PerRepo[repo]
-	if !ok {
-		return Result{}, fmt.Errorf("repo %q not found under org %q", repo, org)
+	o, perRepo, err := lookupTarget(cfg, org, repo)
+	if err != nil {
+		return Result{}, err
 	}
 
-	intents := plan.ForRepo(repo, r)
+	intents := plan.ForRepoCascade(repo, o.AllRepos, perRepo)
 	resolved, err := resolveAll(intents)
 	if err != nil {
 		return Result{}, err
@@ -233,16 +241,12 @@ type EnforceOptions struct {
 // The TTY/--yes confirmation contract is owned by the CLI layer; by the
 // time EnforceRepo is called, the caller has already decided to proceed.
 func EnforceRepo(ctx context.Context, cfg *config.Config, org, repo string, backend gh.Backend, out io.Writer, opts EnforceOptions) (Result, error) {
-	o, ok := cfg.Org(org)
-	if !ok {
-		return Result{}, fmt.Errorf("org %q not found in config", org)
-	}
-	r, ok := o.PerRepo[repo]
-	if !ok {
-		return Result{}, fmt.Errorf("repo %q not found under org %q", repo, org)
+	o, perRepo, err := lookupTarget(cfg, org, repo)
+	if err != nil {
+		return Result{}, err
 	}
 
-	intents := plan.ForRepo(repo, r)
+	intents := plan.ForRepoCascade(repo, o.AllRepos, perRepo)
 
 	resolved, err := resolveForEnforce(intents, opts.DryRun)
 	if err != nil {
@@ -253,7 +257,8 @@ func EnforceRepo(ctx context.Context, cfg *config.Config, org, repo string, back
 	if err != nil {
 		return Result{}, err
 	}
-	entries := diff.Compute(repo, intents, desiredVarsFromResolved(intents, resolved), live, r.Ignored)
+	effIgnored := plan.EffectiveIgnored(o.AllRepos, perRepo)
+	entries := diff.Compute(repo, intents, desiredVarsFromResolved(intents, resolved), live, effIgnored)
 
 	if !opts.DryRun && opts.Confirm != nil && !opts.Confirm(extraKindNames(entries)) {
 		return Result{}, nil
@@ -358,6 +363,119 @@ func deleteOne(ctx context.Context, backend gh.Backend, org, repo string, kind p
 		return backend.DeleteRepoDependabotSecret(ctx, org, repo, name)
 	}
 	return fmt.Errorf("unknown kind %q", kind)
+}
+
+// OrgResult aggregates per-repo outcomes from an org-wide run.
+type OrgResult struct {
+	// Drift is true if any repo's audit produced drift.
+	Drift bool
+	// FailedEntries is the cross-repo sum of per-entry failures (apply/enforce).
+	FailedEntries int
+	// OkRepos is the count of repos that completed without a per-repo error.
+	OkRepos int
+	// FailedRepos is the count of repos whose top-level call returned an error.
+	FailedRepos int
+}
+
+// targetRepos returns the org repos that will be processed: every name from
+// ListOrgRepos for which either all-repos applies or a per-repo entry exists.
+//
+// Repos not addressed by config are skipped silently — there is nothing to
+// audit, apply, or enforce on them.
+func targetRepos(ctx context.Context, backend gh.Backend, o *config.Org, org string) ([]string, error) {
+	all, err := backend.ListOrgRepos(ctx, org)
+	if err != nil {
+		return nil, fmt.Errorf("list org repos: %w", err)
+	}
+	out := make([]string, 0, len(all))
+	for _, r := range all {
+		if o.AllRepos != nil || o.PerRepo[r] != nil {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// Audit runs an audit across every repo in the org. Per-repo errors are
+// reported and the run continues. The final summary line counts ok and
+// failed repos.
+func Audit(ctx context.Context, cfg *config.Config, org string, backend gh.Backend, out io.Writer, showIgnored bool) (OrgResult, error) {
+	o, ok := cfg.Org(org)
+	if !ok {
+		return OrgResult{}, fmt.Errorf("org %q not found in config", org)
+	}
+	repos, err := targetRepos(ctx, backend, o, org)
+	if err != nil {
+		return OrgResult{}, err
+	}
+	var res OrgResult
+	for _, repo := range repos {
+		r, err := AuditRepo(ctx, cfg, org, repo, backend, out, showIgnored)
+		if err != nil {
+			fmt.Fprintf(out, "repo: %s\n  ERROR: %v\n", repo, err)
+			res.FailedRepos++
+			continue
+		}
+		if r.Drift {
+			res.Drift = true
+		}
+		res.OkRepos++
+	}
+	fmt.Fprintf(out, "summary: ok=%d failed=%d\n", res.OkRepos, res.FailedRepos)
+	return res, nil
+}
+
+// Apply runs apply across every repo in the org. Per-repo errors are
+// reported and the run continues; per-entry write failures are summed
+// into FailedEntries.
+func Apply(ctx context.Context, cfg *config.Config, org string, backend gh.Backend, out io.Writer) (OrgResult, error) {
+	o, ok := cfg.Org(org)
+	if !ok {
+		return OrgResult{}, fmt.Errorf("org %q not found in config", org)
+	}
+	repos, err := targetRepos(ctx, backend, o, org)
+	if err != nil {
+		return OrgResult{}, err
+	}
+	var res OrgResult
+	for _, repo := range repos {
+		r, err := ApplyRepo(ctx, cfg, org, repo, backend, out)
+		if err != nil {
+			fmt.Fprintf(out, "repo: %s\n  ERROR: %v\n", repo, err)
+			res.FailedRepos++
+			continue
+		}
+		res.FailedEntries += r.Failed
+		res.OkRepos++
+	}
+	fmt.Fprintf(out, "summary: ok=%d failed=%d\n", res.OkRepos, res.FailedRepos)
+	return res, nil
+}
+
+// Enforce runs enforce across every repo in the org. The provided opts
+// are forwarded to each EnforceRepo call.
+func Enforce(ctx context.Context, cfg *config.Config, org string, backend gh.Backend, out io.Writer, opts EnforceOptions) (OrgResult, error) {
+	o, ok := cfg.Org(org)
+	if !ok {
+		return OrgResult{}, fmt.Errorf("org %q not found in config", org)
+	}
+	repos, err := targetRepos(ctx, backend, o, org)
+	if err != nil {
+		return OrgResult{}, err
+	}
+	var res OrgResult
+	for _, repo := range repos {
+		r, err := EnforceRepo(ctx, cfg, org, repo, backend, out, opts)
+		if err != nil {
+			fmt.Fprintf(out, "repo: %s\n  ERROR: %v\n", repo, err)
+			res.FailedRepos++
+			continue
+		}
+		res.FailedEntries += r.Failed
+		res.OkRepos++
+	}
+	fmt.Fprintf(out, "summary: ok=%d failed=%d\n", res.OkRepos, res.FailedRepos)
+	return res, nil
 }
 
 // writeFile is a thin wrapper used by tests to materialize fixture YAML.

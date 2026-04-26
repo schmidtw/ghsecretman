@@ -18,6 +18,8 @@ import (
 // Backend is the interface the runner consumes; satisfied by *Client and
 // by test fakes.
 type Backend interface {
+	ListOrgRepos(ctx context.Context, org string) ([]string, error)
+
 	ListRepoVariables(ctx context.Context, owner, repo string) (map[string]string, error)
 	ListRepoSecrets(ctx context.Context, owner, repo string) ([]string, error)
 	ListRepoDependabotSecrets(ctx context.Context, owner, repo string) ([]string, error)
@@ -56,6 +58,31 @@ func NewClientFromEnv() (*Client, error) {
 // that need to point at httptest.
 func NewClientFromGoGithub(gh *gogithub.Client) *Client {
 	return &Client{gh: gh}
+}
+
+// ListOrgRepos returns the names of every repository in the org. Pages
+// through the list until exhausted.
+func (c *Client) ListOrgRepos(ctx context.Context, org string) ([]string, error) {
+	opts := &gogithub.RepositoryListByOrgOptions{
+		ListOptions: gogithub.ListOptions{PerPage: 100},
+	}
+	var names []string
+	for {
+		repos, resp, err := c.gh.Repositories.ListByOrg(ctx, org, opts)
+		if err != nil {
+			return nil, fmt.Errorf("list org repos: %w", err)
+		}
+		for _, r := range repos {
+			if r != nil && r.Name != nil {
+				names = append(names, *r.Name)
+			}
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return names, nil
 }
 
 // ListRepoVariables returns repo Actions variables as a name → value map.

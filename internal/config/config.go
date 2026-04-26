@@ -25,7 +25,10 @@ func (c *Config) Org(name string) (*Org, bool) {
 
 // Org holds per-organization configuration.
 type Org struct {
-	PerRepo map[string]*Repo
+	// AllRepos, when set, holds values to fan out to every repo in the org.
+	// Per-repo entries override or shield individual repos.
+	AllRepos *Repo
+	PerRepo  map[string]*Repo
 }
 
 // Repo holds per-repo configuration.
@@ -129,13 +132,19 @@ func decodeOrg(baseDir, orgName string, n *yaml.Node) (*Org, error) {
 			}
 			for j := 0; j < len(val.Content); j += 2 {
 				repoName := val.Content[j].Value
-				repo, err := decodeRepo(baseDir, orgName, repoName, val.Content[j+1])
+				repo, err := decodeRepo(baseDir, repoName, val.Content[j+1])
 				if err != nil {
 					return nil, err
 				}
 				org.PerRepo[repoName] = repo
 			}
-		case "org", "all-repos":
+		case "all-repos":
+			repo, err := decodeRepo(baseDir, "all-repos", val)
+			if err != nil {
+				return nil, err
+			}
+			org.AllRepos = repo
+		case "org":
 			// Out of scope for this slice; reserved for future slices.
 			return nil, fmt.Errorf("org %q: scope %q not yet supported", orgName, key)
 		default:
@@ -145,7 +154,7 @@ func decodeOrg(baseDir, orgName string, n *yaml.Node) (*Org, error) {
 	return org, nil
 }
 
-func decodeRepo(baseDir, orgName, repoName string, n *yaml.Node) (*Repo, error) {
+func decodeRepo(baseDir, repoName string, n *yaml.Node) (*Repo, error) {
 	if n.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("repo %q must be a mapping", repoName)
 	}
