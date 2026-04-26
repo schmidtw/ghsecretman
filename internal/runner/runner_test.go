@@ -8,10 +8,13 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/schmidtw/ghsecretman/internal/config"
+	gh "github.com/schmidtw/ghsecretman/internal/github"
 )
 
 type fakeBackend struct {
@@ -19,6 +22,33 @@ type fakeBackend struct {
 	secrets    []string
 	dependabot []string
 	err        error
+
+	actionsKey    *gh.PublicKey
+	dependabotKey *gh.PublicKey
+
+	actionsKeyErr    error
+	dependabotKeyErr error
+
+	mu          sync.Mutex
+	setVarCalls []setVarCall
+	setSecCalls []setSecretCall
+	setDepCalls []setSecretCall
+
+	// keyFetchCount tracks how many times each key fetch endpoint was called.
+	actionsKeyFetches    int
+	dependabotKeyFetches int
+
+	// setErr injects errors for specific (kind, name) pairs.
+	setErr map[string]error
+}
+
+type setVarCall struct {
+	owner, repo, name, value string
+}
+
+type setSecretCall struct {
+	owner, repo, name, plaintext string
+	keyID                        string
 }
 
 func (f *fakeBackend) ListRepoVariables(_ context.Context, _, _ string) (map[string]string, error) {
@@ -32,6 +62,70 @@ func (f *fakeBackend) ListRepoSecrets(_ context.Context, _, _ string) ([]string,
 }
 func (f *fakeBackend) ListRepoDependabotSecrets(_ context.Context, _, _ string) ([]string, error) {
 	return f.dependabot, f.err
+}
+
+func (f *fakeBackend) GetRepoPublicKey(_ context.Context, _, _ string) (*gh.PublicKey, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actionsKeyFetches++
+	if f.actionsKeyErr != nil {
+		return nil, f.actionsKeyErr
+	}
+	if f.actionsKey == nil {
+		return &gh.PublicKey{KeyID: "key-actions", Key: "AAAA"}, nil
+	}
+	return f.actionsKey, nil
+}
+
+func (f *fakeBackend) GetRepoDependabotPublicKey(_ context.Context, _, _ string) (*gh.PublicKey, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dependabotKeyFetches++
+	if f.dependabotKeyErr != nil {
+		return nil, f.dependabotKeyErr
+	}
+	if f.dependabotKey == nil {
+		return &gh.PublicKey{KeyID: "key-dep", Key: "BBBB"}, nil
+	}
+	return f.dependabotKey, nil
+}
+
+func (f *fakeBackend) SetRepoVariable(_ context.Context, owner, repo, name, value string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.setErr["vars/"+name]; ok {
+		return e
+	}
+	f.setVarCalls = append(f.setVarCalls, setVarCall{owner, repo, name, value})
+	return nil
+}
+
+func (f *fakeBackend) SetRepoSecret(_ context.Context, owner, repo, name string, key *gh.PublicKey, plaintext string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.setErr["secrets/"+name]; ok {
+		return e
+	}
+	keyID := ""
+	if key != nil {
+		keyID = key.KeyID
+	}
+	f.setSecCalls = append(f.setSecCalls, setSecretCall{owner, repo, name, plaintext, keyID})
+	return nil
+}
+
+func (f *fakeBackend) SetRepoDependabotSecret(_ context.Context, owner, repo, name string, key *gh.PublicKey, plaintext string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.setErr["dependabot/"+name]; ok {
+		return e
+	}
+	keyID := ""
+	if key != nil {
+		keyID = key.KeyID
+	}
+	f.setDepCalls = append(f.setDepCalls, setSecretCall{owner, repo, name, plaintext, keyID})
+	return nil
 }
 
 func TestAuditRepo_Drift(t *testing.T) {
@@ -228,6 +322,308 @@ github.com:
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
+}
+
+func TestApplyRepo_WritesAllSections(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := writeFile(filepath.Join(dir, "f.txt"), []byte("file-val")); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V1:
+              value: v-one
+            V2:
+              file: f.txt
+          secrets:
+            S1:
+              value: s-one
+            S2:
+              value: s-two
+          dependabot:
+            D1:
+              value: d-one
+        ignored:
+          vars:
+            - IG_VAR
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{}
+	var out bytes.Buffer
+	res, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &out)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Failed != 0 {
+		t.Errorf("expected zero failures, got %d", res.Failed)
+	}
+
+	if got := callNames(be.setVarCalls); !equalSorted(got, []string{"V1", "V2"}) {
+		t.Errorf("vars set: got %v want [V1 V2]", got)
+	}
+	if got := secretCallNames(be.setSecCalls); !equalSorted(got, []string{"S1", "S2"}) {
+		t.Errorf("secrets set: got %v want [S1 S2]", got)
+	}
+	if got := secretCallNames(be.setDepCalls); !equalSorted(got, []string{"D1"}) {
+		t.Errorf("dependabot set: got %v want [D1]", got)
+	}
+
+	for _, c := range be.setVarCalls {
+		switch c.name {
+		case "V1":
+			if c.value != "v-one" {
+				t.Errorf("V1 value: %q", c.value)
+			}
+		case "V2":
+			if c.value != "file-val" {
+				t.Errorf("V2 value: %q", c.value)
+			}
+		}
+	}
+	for _, c := range be.setSecCalls {
+		if c.keyID != "key-actions" {
+			t.Errorf("secret %s: keyID=%q", c.name, c.keyID)
+		}
+	}
+	for _, c := range be.setDepCalls {
+		if c.keyID != "key-dep" {
+			t.Errorf("dependabot %s: keyID=%q", c.name, c.keyID)
+		}
+	}
+
+	if be.actionsKeyFetches != 1 {
+		t.Errorf("actions key fetched %d times; expected exactly 1", be.actionsKeyFetches)
+	}
+	if be.dependabotKeyFetches != 1 {
+		t.Errorf("dependabot key fetched %d times; expected exactly 1", be.dependabotKeyFetches)
+	}
+
+	s := out.String()
+	for _, want := range []string{"repo: acme", "vars/V1: ok", "secrets/S1: ok", "dependabot/D1: ok"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("output missing %q\n--\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "FAILED") {
+		t.Errorf("unexpected FAILED line:\n%s", s)
+	}
+	if strings.Contains(s, "summary:") {
+		t.Errorf("no summary line should appear when nothing failed:\n%s", s)
+	}
+}
+
+func TestApplyRepo_OnlyVars_NoKeyFetch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              value: x
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{}
+	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if be.actionsKeyFetches != 0 || be.dependabotKeyFetches != 0 {
+		t.Errorf("no key should be fetched when only vars are managed; actions=%d dep=%d",
+			be.actionsKeyFetches, be.dependabotKeyFetches)
+	}
+}
+
+func TestApplyRepo_PerEntryFailureContinues(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V_GOOD:
+              value: ok
+            V_BAD:
+              value: ok
+          secrets:
+            S_GOOD:
+              value: ok
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{
+		setErr: map[string]error{"vars/V_BAD": errors.New("rate limit")},
+	}
+	var out bytes.Buffer
+	res, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &out)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Failed != 1 {
+		t.Errorf("expected 1 failure, got %d", res.Failed)
+	}
+	if got := callNames(be.setVarCalls); !equalSorted(got, []string{"V_GOOD"}) {
+		t.Errorf("V_BAD should not appear in successful var calls: %v", got)
+	}
+	if len(be.setSecCalls) != 1 {
+		t.Errorf("S_GOOD should still be applied after V_BAD failed: %+v", be.setSecCalls)
+	}
+	s := out.String()
+	if !strings.Contains(s, "vars/V_BAD: FAILED: rate limit") {
+		t.Errorf("output missing failure line:\n%s", s)
+	}
+	if !strings.Contains(s, "summary: 1 failed") {
+		t.Errorf("output missing summary line:\n%s", s)
+	}
+}
+
+func TestApplyRepo_KeyFetchFailure(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          secrets:
+            S:
+              value: x
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{actionsKeyErr: errors.New("forbidden")}
+	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected error when public key fetch fails")
+	}
+}
+
+func TestApplyRepo_DependabotKeyFetchFailure(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          dependabot:
+            D:
+              value: x
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{dependabotKeyErr: errors.New("forbidden")}
+	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected error when dependabot public key fetch fails")
+	}
+}
+
+func TestApplyRepo_ResolveError(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              file: missing.txt
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", &fakeBackend{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected resolve error")
+	}
+}
+
+func TestApplyRepo_UnknownOrgRepo(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Orgs: map[string]*config.Org{}}
+	if _, err := ApplyRepo(context.Background(), cfg, "missing", "acme", &fakeBackend{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected error for unknown org")
+	}
+	cfg.Orgs["example"] = &config.Org{PerRepo: map[string]*config.Repo{}}
+	if _, err := ApplyRepo(context.Background(), cfg, "example", "missing", &fakeBackend{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected error for unknown repo")
+	}
+}
+
+func callNames(cs []setVarCall) []string {
+	out := make([]string, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, c.name)
+	}
+	return out
+}
+
+func secretCallNames(cs []setSecretCall) []string {
+	out := make([]string, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, c.name)
+	}
+	return out
+}
+
+func equalSorted(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	aa := append([]string(nil), a...)
+	bb := append([]string(nil), b...)
+	slices.Sort(aa)
+	slices.Sort(bb)
+	for i := range aa {
+		if aa[i] != bb[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestAuditRepo_ShowIgnored(t *testing.T) {
