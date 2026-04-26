@@ -15,6 +15,40 @@ import (
 	gh "github.com/schmidtw/ghsecretman/internal/github"
 )
 
+func swapBuildVars(t *testing.T, c, d string) {
+	t.Helper()
+	prevC, prevD := commit, date
+	commit, date = c, d
+	t.Cleanup(func() { commit, date = prevC, prevD })
+}
+
+func TestRun_VersionSubcommand(t *testing.T) {
+	swapBuildVars(t, "abcdef1", "2026-04-26T00:00:00Z")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "version"}, "1.2.3", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d want 0; stderr=%q", code, stderr.String())
+	}
+	want := "ghsecretman 1.2.3\ncommit abcdef1\nbuilt 2026-04-26T00:00:00Z\n"
+	if got := stdout.String(); got != want {
+		t.Fatalf("stdout: got %q, want %q", got, want)
+	}
+}
+
+func TestRun_VersionSubcommand_Defaults(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "version"}, "dev", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d want 0; stderr=%q", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"ghsecretman dev", "commit ", "built "} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q: %q", want, out)
+		}
+	}
+}
+
 func TestRun_Version(t *testing.T) {
 	tests := []struct {
 		name    string
