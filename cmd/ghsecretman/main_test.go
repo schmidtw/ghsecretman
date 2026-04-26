@@ -4,8 +4,14 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	gh "github.com/schmidtw/ghsecretman/internal/github"
 )
 
 func TestRun_Version(t *testing.T) {
@@ -61,5 +67,147 @@ func TestRun_NoArgs(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "usage") {
 		t.Fatalf("stderr should contain usage hint: %q", stderr.String())
+	}
+}
+
+type fakeBackend struct {
+	vars       map[string]string
+	secrets    []string
+	dependabot []string
+}
+
+func (f *fakeBackend) ListRepoVariables(_ context.Context, _, _ string) (map[string]string, error) {
+	return f.vars, nil
+}
+func (f *fakeBackend) ListRepoSecrets(_ context.Context, _, _ string) ([]string, error) {
+	return f.secrets, nil
+}
+func (f *fakeBackend) ListRepoDependabotSecrets(_ context.Context, _, _ string) ([]string, error) {
+	return f.dependabot, nil
+}
+
+func writeCfg(t *testing.T, dir, body string) string {
+	t.Helper()
+	p := filepath.Join(dir, "secrets.yml")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func swapBackend(t *testing.T, be gh.Backend, beErr error) {
+	t.Helper()
+	prev := backendFactory
+	backendFactory = func() (gh.Backend, error) {
+		if beErr != nil {
+			return nil, beErr
+		}
+		return be, nil
+	}
+	t.Cleanup(func() { backendFactory = prev })
+}
+
+func TestRun_AuditClean(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              value: ok
+`)
+	swapBackend(t, &fakeBackend{vars: map[string]string{"V": "ok"}}, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "audit", "--config", cfgPath, "--org", "example", "--repo", "acme"}, "dev", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d want 0; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "repo: acme") {
+		t.Fatalf("stdout missing stanza header: %q", stdout.String())
+	}
+}
+
+func TestRun_AuditDriftReturnsOne(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              value: yaml
+`)
+	swapBackend(t, &fakeBackend{vars: map[string]string{"V": "live"}}, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "audit", "--config", cfgPath, "--org", "example", "--repo", "acme"}, "dev", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit: got %d want 1", code)
+	}
+}
+
+func TestRun_AuditMissingFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "audit"}, "dev", &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit: got %d want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "required") {
+		t.Fatalf("stderr should mention required: %q", stderr.String())
+	}
+}
+
+func TestRun_AuditBadConfig(t *testing.T) {
+	swapBackend(t, &fakeBackend{}, nil)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "audit", "--config", "/no/such/file.yml", "--org", "example", "--repo", "acme"}, "dev", &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit: got %d want 2", code)
+	}
+}
+
+func TestRun_AuditBackendError(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed: {}
+`)
+	swapBackend(t, nil, errors.New("no token"))
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "audit", "--config", cfgPath, "--org", "example", "--repo", "acme"}, "dev", &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit: got %d want 2", code)
+	}
+}
+
+func TestRun_AuditUnknownRepo(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo: {}
+`)
+	swapBackend(t, &fakeBackend{}, nil)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "audit", "--config", cfgPath, "--org", "example", "--repo", "nope"}, "dev", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit: got %d want 1", code)
+	}
+}
+
+func TestRun_AuditBadFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "audit", "--bogus"}, "dev", &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit: got %d want 2", code)
 	}
 }
