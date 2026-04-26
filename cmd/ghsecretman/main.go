@@ -19,8 +19,13 @@ import (
 	"github.com/schmidtw/ghsecretman/internal/runner"
 )
 
-// version is set at build time via -ldflags "-X main.version=<value>".
-var version = "dev"
+// version, commit, and date are set at build time via -ldflags
+// "-X main.version=<value> -X main.commit=<sha> -X main.date=<rfc3339>".
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
 
 // backendFactory is overridden in tests to inject a fake backend.
 var backendFactory = func() (gh.Backend, error) { return gh.NewClientFromEnv() }
@@ -51,6 +56,9 @@ func run(args []string, ver string, stdout, stderr io.Writer) int {
 			return runApply(args[2:], stdout, stderr)
 		case "enforce":
 			return runEnforce(args[2:], stdout, stderr)
+		case "version":
+			fmt.Fprintf(stdout, "ghsecretman %s\ncommit %s\nbuilt %s\n", ver, commit, date)
+			return 0
 		}
 	}
 
