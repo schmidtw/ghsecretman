@@ -40,6 +40,11 @@ type Intent struct {
 	Name   string
 	Action Action
 	Entry  *config.Entry
+
+	// OverridesAllRepos is true when this intent's name was also present in
+	// all-repos.managed and the per-repo entry took precedence. Reserved for
+	// audit-side override reporting; runtime behavior is unaffected.
+	OverridesAllRepos bool
 }
 
 // ForRepo returns intents for every managed entry on the repo plus a

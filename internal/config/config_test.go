@@ -306,6 +306,80 @@ github.com:
 	}
 }
 
+func TestLoad_AllRepos(t *testing.T) {
+	t.Parallel()
+
+	const yml = `
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          ALL_VAR:
+            value: shared
+        secrets:
+          ALL_SEC:
+            value: s
+        dependabot:
+          ALL_DEP:
+            value: d
+      ignored:
+        vars:
+          - ALL_IG_VAR
+        secrets:
+          - ALL_IG_SEC
+        dependabot:
+          - ALL_IG_DEP
+    per-repo:
+      acme:
+        managed:
+          vars:
+            REPO_VAR:
+              value: r
+`
+	cfg, err := LoadBytes([]byte(yml), "/c/secrets.yml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	org, ok := cfg.Org("example")
+	if !ok {
+		t.Fatalf("org example missing")
+	}
+	if org.AllRepos == nil {
+		t.Fatalf("AllRepos missing")
+	}
+	if org.AllRepos.Managed.Vars["ALL_VAR"].Value != "shared" {
+		t.Errorf("ALL_VAR value: %+v", org.AllRepos.Managed.Vars["ALL_VAR"])
+	}
+	if !contains(org.AllRepos.Ignored.Vars, "ALL_IG_VAR") {
+		t.Errorf("ALL_IG_VAR not in ignored: %v", org.AllRepos.Ignored.Vars)
+	}
+	if org.PerRepo["acme"].Managed.Vars["REPO_VAR"].Value != "r" {
+		t.Errorf("REPO_VAR not parsed")
+	}
+}
+
+func TestLoad_AllReposManagedIgnoredConflict(t *testing.T) {
+	t.Parallel()
+	const yml = `
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          DUP:
+            value: x
+      ignored:
+        vars:
+          - DUP
+`
+	if _, err := LoadBytes([]byte(yml), "/c/secrets.yml"); err == nil {
+		t.Fatal("expected conflict error")
+	} else if !strings.Contains(err.Error(), "DUP") {
+		t.Errorf("error should mention DUP: %v", err)
+	}
+}
+
 func TestLoad_NoSection(t *testing.T) {
 	t.Parallel()
 	cfg, err := LoadBytes([]byte("other:\n  k: v\n"), "/c/x.yml")
