@@ -22,6 +22,76 @@ import (
 	"golang.org/x/crypto/nacl/box"
 )
 
+func TestClient_ListOrgRepos(t *testing.T) {
+	t.Parallel()
+	srv, c := newTestClient(t, map[string]string{
+		"/orgs/example/repos": `[{"name":"alpha"},{"name":"beta"}]`,
+	})
+	defer srv.Close()
+
+	got, err := c.ListOrgRepos(context.Background(), "example")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	sort.Strings(got)
+	want := []string{"alpha", "beta"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("got %v want %v", got, want)
+	}
+}
+
+func TestClient_ListOrgRepos_Pagination(t *testing.T) {
+	t.Parallel()
+	var (
+		mu       sync.Mutex
+		seenPage []string
+	)
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		page := r.URL.Query().Get("page")
+		seenPage = append(seenPage, page)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch page {
+		case "", "1":
+			w.Header().Set("Link", `<`+srvURL+r.URL.Path+`?page=2>; rel="next"`)
+			fmt.Fprint(w, `[{"name":"alpha"}]`)
+		case "2":
+			fmt.Fprint(w, `[{"name":"beta"}]`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	srvURL = srv.URL
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+
+	got, err := c.ListOrgRepos(context.Background(), "example")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	sort.Strings(got)
+	if strings.Join(got, ",") != "alpha,beta" {
+		t.Fatalf("got %v", got)
+	}
+	if len(seenPage) < 2 {
+		t.Errorf("expected pagination across at least 2 pages; saw %v", seenPage)
+	}
+}
+
+func TestClient_ListOrgRepos_Error(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"nope"}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+	if _, err := c.ListOrgRepos(context.Background(), "example"); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 func TestClient_ListRepoVariables(t *testing.T) {
 	t.Parallel()
 	srv, c := newTestClient(t, map[string]string{

@@ -18,6 +18,9 @@ import (
 )
 
 type fakeBackend struct {
+	orgRepos    []string
+	orgReposErr error
+
 	vars       map[string]string
 	secrets    []string
 	dependabot []string
@@ -55,6 +58,10 @@ type setVarCall struct {
 type setSecretCall struct {
 	owner, repo, name, plaintext string
 	keyID                        string
+}
+
+func (f *fakeBackend) ListOrgRepos(_ context.Context, _ string) ([]string, error) {
+	return f.orgRepos, f.orgReposErr
 }
 
 func (f *fakeBackend) ListRepoVariables(_ context.Context, _, _ string) (map[string]string, error) {

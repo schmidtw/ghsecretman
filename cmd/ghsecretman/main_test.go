@@ -71,6 +71,8 @@ func TestRun_NoArgs(t *testing.T) {
 }
 
 type fakeBackend struct {
+	orgRepos []string
+
 	vars       map[string]string
 	secrets    []string
 	dependabot []string
@@ -82,6 +84,10 @@ type fakeBackend struct {
 	delVars       []string
 	delSecrets    []string
 	delDependabot []string
+}
+
+func (f *fakeBackend) ListOrgRepos(_ context.Context, _ string) ([]string, error) {
+	return f.orgRepos, nil
 }
 
 func (f *fakeBackend) ListRepoVariables(_ context.Context, _, _ string) (map[string]string, error) {
