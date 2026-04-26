@@ -295,6 +295,129 @@ func sortedEqual(a, b []string) bool {
 	return equal(aa, bb)
 }
 
+func TestForOrg(t *testing.T) {
+	t.Parallel()
+	s := &config.OrgScope{
+		Managed: config.OrgManaged{
+			Vars: map[string]*config.OrgEntry{
+				"V_ALL": {
+					Entry:      &config.Entry{Name: "V_ALL", HasValue: true, Value: "vall"},
+					Visibility: "all",
+				},
+				"V_SEL": {
+					Entry:      &config.Entry{Name: "V_SEL", HasValue: true, Value: "vsel"},
+					Visibility: "selected",
+					Repos:      []string{"r1", "r2"},
+				},
+			},
+			Secrets: map[string]*config.OrgEntry{
+				"S_PRIV": {
+					Entry:      &config.Entry{Name: "S_PRIV", HasValue: true, Value: "x"},
+					Visibility: "private",
+				},
+			},
+			Dependabot: map[string]*config.OrgEntry{
+				"D1": {
+					Entry:      &config.Entry{Name: "D1", HasValue: true, Value: "d"},
+					Visibility: "all",
+				},
+			},
+		},
+		Ignored: config.Ignored{
+			Vars:       []string{"IGV"},
+			Secrets:    []string{"IGS"},
+			Dependabot: []string{"IGD"},
+		},
+	}
+	intents := ForOrg(s)
+
+	// Org intents must be distinct from repo intents: IsOrg=true, Repo="".
+	for _, in := range intents {
+		if !in.IsOrg {
+			t.Errorf("expected IsOrg=true on %+v", in)
+		}
+		if in.Repo != "" {
+			t.Errorf("expected empty Repo on %+v", in)
+		}
+	}
+
+	byName := map[string]Intent{}
+	for _, in := range intents {
+		byName[string(in.Kind)+"/"+in.Name] = in
+	}
+	if got := byName["vars/V_ALL"]; got.Visibility != "all" || got.Action != ActionManaged {
+		t.Errorf("V_ALL intent: %+v", got)
+	}
+	sel := byName["vars/V_SEL"]
+	if sel.Visibility != "selected" || !equal(sel.SelectedRepos, []string{"r1", "r2"}) {
+		t.Errorf("V_SEL intent: %+v", sel)
+	}
+	if got := byName["secrets/S_PRIV"]; got.Visibility != "private" {
+		t.Errorf("S_PRIV visibility: %q", got.Visibility)
+	}
+	if got := byName["vars/IGV"]; got.Action != ActionIgnored {
+		t.Errorf("IGV should be ignored: %+v", got)
+	}
+	if got := byName["dependabot/D1"]; got.Entry == nil || got.Entry.Value != "d" {
+		t.Errorf("D1 entry wrong: %+v", got)
+	}
+}
+
+func TestForOrg_NilOrEmpty(t *testing.T) {
+	t.Parallel()
+	if intents := ForOrg(nil); len(intents) != 0 {
+		t.Errorf("nil OrgScope: got %d intents", len(intents))
+	}
+	if intents := ForOrg(&config.OrgScope{}); len(intents) != 0 {
+		t.Errorf("empty OrgScope: got %d intents", len(intents))
+	}
+}
+
+func TestEffectiveOrgIgnored(t *testing.T) {
+	t.Parallel()
+	if got := EffectiveOrgIgnored(nil); len(got.Vars)+len(got.Secrets)+len(got.Dependabot) != 0 {
+		t.Errorf("nil scope should produce empty ignored: %+v", got)
+	}
+	s := &config.OrgScope{Ignored: config.Ignored{
+		Vars:       []string{"V"},
+		Secrets:    []string{"S"},
+		Dependabot: []string{"D"},
+	}}
+	got := EffectiveOrgIgnored(s)
+	if !equal(got.Vars, []string{"V"}) || !equal(got.Secrets, []string{"S"}) || !equal(got.Dependabot, []string{"D"}) {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestForOrg_DistinctFromRepoIntents(t *testing.T) {
+	t.Parallel()
+	// Same name X on org-level vars and on repo-level vars must produce two
+	// intents that don't collide: one with IsOrg=true, one with IsOrg=false.
+	s := &config.OrgScope{
+		Managed: config.OrgManaged{
+			Vars: map[string]*config.OrgEntry{"X": {
+				Entry: &config.Entry{Name: "X", HasValue: true, Value: "org-x"}, Visibility: "all",
+			}},
+		},
+	}
+	repo := &config.Repo{
+		Managed: config.Managed{
+			Vars: map[string]*config.Entry{"X": {Name: "X", HasValue: true, Value: "repo-x"}},
+		},
+	}
+	orgIntents := ForOrg(s)
+	repoIntents := ForRepo("acme", repo)
+	if len(orgIntents) != 1 || !orgIntents[0].IsOrg {
+		t.Fatalf("org intents wrong: %+v", orgIntents)
+	}
+	if len(repoIntents) != 1 || repoIntents[0].IsOrg {
+		t.Fatalf("repo intents wrong: %+v", repoIntents)
+	}
+	if orgIntents[0].Entry.Value == repoIntents[0].Entry.Value {
+		t.Errorf("entries should be distinct; got same value %q", orgIntents[0].Entry.Value)
+	}
+}
+
 func TestForRepo_EmptyRepo(t *testing.T) {
 	t.Parallel()
 	intents := ForRepo("acme", &config.Repo{})
