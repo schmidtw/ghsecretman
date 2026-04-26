@@ -4,25 +4,25 @@
 version: 2
 updates:
 
-  - package-ecosystem: "github-actions"
-    directory: "/"
+  - package-ecosystem: github-actions
+    directory: /
     schedule:
       # Check for updates to GitHub Actions every day
-      interval: "daily"
+      interval: weekly
     labels:
-      - "dependencies"
+      - dependencies
     commit-message:
-      prefix: "chore"
-      include: "scope"
+      prefix: chore
+      include: scope
     open-pull-requests-limit: 10
 
   - package-ecosystem: gomod
     directory: /
     schedule:
-      interval: daily
+      interval: weekly
     labels:
-      - "dependencies"
+      - dependencies
     commit-message:
-      prefix: "chore"
-      include: "scope"
+      prefix: chore
+      include: scope
     open-pull-requests-limit: 10
