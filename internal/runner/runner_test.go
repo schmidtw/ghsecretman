@@ -4,6 +4,7 @@
 package runner
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/schmidtw/ghsecretman/internal/config"
@@ -1298,7 +1300,7 @@ github.com:
 		vars:     map[string]string{"ALL_VAR": "ok"},
 	}
 	var out bytes.Buffer
-	res, err := Audit(context.Background(), cfg, "example", be, &out, false)
+	res, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1310,7 +1312,7 @@ github.com:
 			res.OkRepos, res.FailedRepos)
 	}
 	s := out.String()
-	for _, want := range []string{"repo: acme", "repo: beta", "summary: ok=2 failed=0"} {
+	for _, want := range []string{"repo: acme", "repo: beta", "summary: ok=2 skipped=0 failed=0"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("output missing %q\n--\n%s", want, s)
 		}
@@ -1342,7 +1344,7 @@ github.com:
 		vars:     map[string]string{"V": "ok"},
 	}
 	var out bytes.Buffer
-	res, err := Audit(context.Background(), cfg, "example", be, &out, false)
+	res, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1379,7 +1381,7 @@ github.com:
 		err:      errors.New("boom"),
 	}
 	var out bytes.Buffer
-	res, err := Audit(context.Background(), cfg, "example", be, &out, false)
+	res, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{})
 	if err != nil {
 		t.Fatalf("Audit should continue on per-repo error, not return one: %v", err)
 	}
@@ -1390,7 +1392,7 @@ github.com:
 	if !strings.Contains(s, "ERROR: ") {
 		t.Errorf("expected ERROR line in output:\n%s", s)
 	}
-	if !strings.Contains(s, "summary: ok=0 failed=2") {
+	if !strings.Contains(s, "summary: ok=0 skipped=0 failed=2") {
 		t.Errorf("expected summary line: %q", s)
 	}
 }
@@ -1412,7 +1414,7 @@ github.com:
 		t.Fatal(err)
 	}
 	be := &fakeBackend{orgReposErr: errors.New("forbidden")}
-	if _, err := Audit(context.Background(), cfg, "example", be, &bytes.Buffer{}, false); err == nil {
+	if _, err := Audit(context.Background(), cfg, "example", be, &bytes.Buffer{}, false, OrgOptions{}); err == nil {
 		t.Fatal("expected error when ListOrgRepos fails")
 	}
 }
@@ -1420,7 +1422,7 @@ github.com:
 func TestAudit_UnknownOrg(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{Orgs: map[string]*config.Org{}}
-	if _, err := Audit(context.Background(), cfg, "missing", &fakeBackend{}, &bytes.Buffer{}, false); err == nil {
+	if _, err := Audit(context.Background(), cfg, "missing", &fakeBackend{}, &bytes.Buffer{}, false, OrgOptions{}); err == nil {
 		t.Fatal("expected error for unknown org")
 	}
 }
@@ -1452,7 +1454,7 @@ github.com:
 	}
 	be := &fakeBackend{orgRepos: []string{"acme", "beta"}}
 	var out bytes.Buffer
-	res, err := Apply(context.Background(), cfg, "example", be, &out)
+	res, err := Apply(context.Background(), cfg, "example", be, &out, OrgOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1477,7 +1479,7 @@ github.com:
 func TestApply_UnknownOrg(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{Orgs: map[string]*config.Org{}}
-	if _, err := Apply(context.Background(), cfg, "missing", &fakeBackend{}, &bytes.Buffer{}); err == nil {
+	if _, err := Apply(context.Background(), cfg, "missing", &fakeBackend{}, &bytes.Buffer{}, OrgOptions{}); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -1488,7 +1490,7 @@ func TestApply_ListOrgReposError(t *testing.T) {
 		"example": {AllRepos: &config.Repo{}},
 	}}
 	be := &fakeBackend{orgReposErr: errors.New("boom")}
-	if _, err := Apply(context.Background(), cfg, "example", be, &bytes.Buffer{}); err == nil {
+	if _, err := Apply(context.Background(), cfg, "example", be, &bytes.Buffer{}, OrgOptions{}); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -1719,5 +1721,373 @@ github.com:
 	}
 	if !strings.Contains(out.String(), "IG_VAR") {
 		t.Errorf("expected IG_VAR in output with showIgnored=true; got:\n%s", out.String())
+	}
+}
+
+// gatedBackend extends fakeBackend with a per-call gate. Every call to
+// ListRepoVariables increments inFlight (then decrements on return) and
+// observes maxInFlight, letting tests assert that no more than the
+// configured concurrency runs at once.
+type gatedBackend struct {
+	fakeBackend
+	inFlight    atomic.Int32
+	maxInFlight atomic.Int32
+	release     chan struct{}
+}
+
+func (g *gatedBackend) ListRepoVariables(_ context.Context, _, _ string) (map[string]string, error) {
+	cur := g.inFlight.Add(1)
+	for {
+		hi := g.maxInFlight.Load()
+		if cur <= hi || g.maxInFlight.CompareAndSwap(hi, cur) {
+			break
+		}
+	}
+	if g.release != nil {
+		<-g.release
+	}
+	g.inFlight.Add(-1)
+	return g.vars, g.err
+}
+
+func TestAudit_RespectsConcurrencyLimit(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          V:
+            value: ok
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoNames := make([]string, 0, 32)
+	for i := range 32 {
+		repoNames = append(repoNames, "r-"+string(rune('a'+i%26))+string(rune('a'+i/26)))
+	}
+	be := &gatedBackend{
+		fakeBackend: fakeBackend{
+			orgRepos: repoNames,
+			vars:     map[string]string{"V": "ok"},
+		},
+		release: make(chan struct{}, len(repoNames)),
+	}
+	for range repoNames {
+		be.release <- struct{}{}
+	}
+
+	var out bytes.Buffer
+	limit := 4
+	if _, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{Concurrency: limit}); err != nil {
+		t.Fatal(err)
+	}
+	if got := int(be.maxInFlight.Load()); got > limit {
+		t.Errorf("max concurrent ListRepoVariables=%d exceeds limit=%d", got, limit)
+	}
+}
+
+// TestAudit_AtomicPerRepoOutput asserts that per-repo stanzas never
+// interleave even when many repos run in parallel. Each stanza begins with
+// "repo: <name>"; once a stanza begins, all subsequent indented lines must
+// belong to that same repo until the next "repo:" header.
+func TestAudit_AtomicPerRepoOutput(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          A:
+            value: ok
+          B:
+            value: ok
+          C:
+            value: ok
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const n = 16
+	repoNames := make([]string, 0, n)
+	for i := range n {
+		repoNames = append(repoNames, "r"+string(rune('a'+i%26))+string(rune('A'+i/26)))
+	}
+	be := &fakeBackend{
+		orgRepos: repoNames,
+		vars:     map[string]string{"A": "ok", "B": "ok", "C": "ok"},
+	}
+
+	var out bytes.Buffer
+	if _, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{Concurrency: 8}); err != nil {
+		t.Fatal(err)
+	}
+
+	scan := bufio.NewScanner(strings.NewReader(out.String()))
+	currentRepo := ""
+	seenRepos := map[string]bool{}
+	for scan.Scan() {
+		line := scan.Text()
+		switch {
+		case strings.HasPrefix(line, "repo: "):
+			currentRepo = strings.TrimPrefix(line, "repo: ")
+			if seenRepos[currentRepo] {
+				t.Fatalf("repo %q stanza appears more than once (interleaved):\n%s",
+					currentRepo, out.String())
+			}
+			seenRepos[currentRepo] = true
+		case strings.HasPrefix(line, "  "):
+			if currentRepo == "" {
+				t.Fatalf("indented line before any repo header:\n%q\nfull output:\n%s", line, out.String())
+			}
+		default:
+			currentRepo = ""
+		}
+	}
+	if len(seenRepos) != n {
+		t.Errorf("expected %d distinct repo stanzas, got %d", n, len(seenRepos))
+	}
+}
+
+func TestAudit_DefaultConcurrencyWhenZero(t *testing.T) {
+	t.Parallel()
+	if got := resolveConcurrency(0); got != DefaultConcurrency {
+		t.Errorf("resolveConcurrency(0)=%d; want %d", got, DefaultConcurrency)
+	}
+	if got := resolveConcurrency(-3); got != DefaultConcurrency {
+		t.Errorf("resolveConcurrency(-3)=%d; want %d", got, DefaultConcurrency)
+	}
+	if got := resolveConcurrency(2); got != 2 {
+		t.Errorf("resolveConcurrency(2)=%d; want 2", got)
+	}
+}
+
+func TestAudit_SkippedCount(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              value: ok
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{
+		orgRepos: []string{"acme", "unrelated", "also-unrelated"},
+		vars:     map[string]string{"V": "ok"},
+	}
+	var out bytes.Buffer
+	res, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OkRepos != 1 {
+		t.Errorf("ok=%d want 1", res.OkRepos)
+	}
+	if res.SkippedRepos != 2 {
+		t.Errorf("skipped=%d want 2", res.SkippedRepos)
+	}
+	if !strings.Contains(out.String(), "summary: ok=1 skipped=2 failed=0") {
+		t.Errorf("summary line missing; got:\n%s", out.String())
+	}
+}
+
+// TestAudit_ExitCodeMatrix exercises the four cases the issue calls out:
+// {clean, drift-only, failure-only, both}. Exit codes are derived in the
+// CLI from (Drift, FailedRepos) — here we assert the OrgResult fields the
+// CLI inspects.
+func TestAudit_ExitCodeMatrix(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          V:
+            value: ok
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name        string
+		live        map[string]string
+		listErr     error
+		wantDrift   bool
+		wantFailed  int
+		wantOk      int
+		wantNonzero bool
+	}{
+		{
+			name:        "clean",
+			live:        map[string]string{"V": "ok"},
+			wantOk:      2,
+			wantNonzero: false,
+		},
+		{
+			name:        "drift-only",
+			live:        map[string]string{"V": "different"},
+			wantDrift:   true,
+			wantOk:      2,
+			wantNonzero: true,
+		},
+		{
+			name:        "failure-only",
+			listErr:     errors.New("boom"),
+			wantFailed:  2,
+			wantNonzero: true,
+		},
+		{
+			name:        "both-drift-and-failure",
+			live:        map[string]string{"V": "different"},
+			listErr:     errors.New("boom"), // err short-circuits before drift, so failure dominates
+			wantFailed:  2,
+			wantNonzero: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			be := &fakeBackend{
+				orgRepos: []string{"a", "b"},
+				vars:     tc.live,
+				err:      tc.listErr,
+			}
+			res, err := Audit(context.Background(), cfg, "example", be, &bytes.Buffer{}, false, OrgOptions{})
+			if err != nil {
+				t.Fatalf("Audit returned err: %v", err)
+			}
+			if res.Drift != tc.wantDrift {
+				t.Errorf("Drift=%v want %v", res.Drift, tc.wantDrift)
+			}
+			if res.FailedRepos != tc.wantFailed {
+				t.Errorf("FailedRepos=%d want %d", res.FailedRepos, tc.wantFailed)
+			}
+			if res.OkRepos != tc.wantOk {
+				t.Errorf("OkRepos=%d want %d", res.OkRepos, tc.wantOk)
+			}
+			nonzero := res.Drift || res.FailedRepos > 0
+			if nonzero != tc.wantNonzero {
+				t.Errorf("derived nonzero exit=%v want %v", nonzero, tc.wantNonzero)
+			}
+		})
+	}
+}
+
+func TestApply_PartialFailureContinues(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          V:
+            value: ok
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{
+		orgRepos: []string{"a", "b", "c"},
+		setErr:   map[string]error{"vars/V": errors.New("rate limit")},
+	}
+	var out bytes.Buffer
+	res, err := Apply(context.Background(), cfg, "example", be, &out, OrgOptions{Concurrency: 3})
+	if err != nil {
+		t.Fatalf("apply should not return an error on per-entry failures: %v", err)
+	}
+	if res.OkRepos != 3 {
+		t.Errorf("OkRepos=%d want 3 (per-repo wrapper succeeds; failure is per-entry)", res.OkRepos)
+	}
+	if res.FailedEntries != 3 {
+		t.Errorf("FailedEntries=%d want 3 (one per repo)", res.FailedEntries)
+	}
+	if !strings.Contains(out.String(), "summary: ok=3 skipped=0 failed=0") {
+		t.Errorf("summary line missing or wrong; got:\n%s", out.String())
+	}
+}
+
+func TestEnforce_AtomicOutputDryRun(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          V:
+            value: ok
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{
+		orgRepos: []string{"a", "b", "c", "d"},
+		vars:     map[string]string{"EXTRA": "x"},
+	}
+	var out bytes.Buffer
+	res, err := Enforce(context.Background(), cfg, "example", be, &out, EnforceOptions{DryRun: true, Concurrency: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OkRepos != 4 {
+		t.Errorf("OkRepos=%d want 4", res.OkRepos)
+	}
+	if !strings.Contains(out.String(), "summary: ok=4 skipped=0 failed=0") {
+		t.Errorf("summary missing; got:\n%s", out.String())
+	}
+	scan := bufio.NewScanner(strings.NewReader(out.String()))
+	seen := map[string]bool{}
+	for scan.Scan() {
+		line := scan.Text()
+		name, ok := strings.CutPrefix(line, "repo: ")
+		if !ok {
+			continue
+		}
+		if seen[name] {
+			t.Fatalf("repo %q stanza split (interleaved):\n%s", name, out.String())
+		}
+		seen[name] = true
 	}
 }
