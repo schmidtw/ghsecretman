@@ -52,7 +52,7 @@ Omit `--repo` to iterate every repo in the org concurrently; `--concurrency` bou
 
 ## Configuration
 
-The full YAML schema (`org`, `per-repo`, `all-repos`, `managed`, `ignored`, value sources, precedence rules, `org`-level `scope`/`repos`) is documented in [PRD #1](https://github.com/schmidtw/ghsecretman/issues/1). A complete annotated example lives in [`example.yml`](example.yml).
+The full YAML schema (`org`, `per-repo`, `all-repos`, `managed`, `ignored`, value sources, precedence rules, `org`-level `scope`/`repos`) is documented in [PRD #1](https://github.com/schmidtw/ghsecretman/issues/1). A complete annotated example lives in [`internal/schema/example.yml`](internal/schema/example.yml), and the same content is embedded in the binary — run `ghsecretman example` to print it, or `ghsecretman example -o secrets.yml` to write a starter config.
 
 Top-level keys other than `github.com:` are ignored, so the same file can carry sections owned by other tools.
 

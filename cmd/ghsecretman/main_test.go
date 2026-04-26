@@ -909,3 +909,105 @@ github.com:
 		t.Errorf("expected one repo var set; got %v", be.setVars)
 	}
 }
+
+func TestRun_Help_PrintsCommandList(t *testing.T) {
+	for _, arg := range []string{"-h", "--help", "help"} {
+		t.Run(arg, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"ghsecretman", arg}, "dev", &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit: got %d want 0; stderr=%q", code, stderr.String())
+			}
+			out := stdout.String()
+			if !strings.Contains(out, "commands:") {
+				t.Fatalf("stdout missing commands section: %q", out)
+			}
+			for _, sub := range []string{"audit", "apply", "enforce", "example", "version"} {
+				if !strings.Contains(out, sub) {
+					t.Errorf("stdout missing subcommand %q", sub)
+				}
+			}
+		})
+	}
+}
+
+func TestRun_Example_Stdout(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "example"}, "dev", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d want 0; stderr=%q", code, stderr.String())
+	}
+	for _, marker := range []string{"github.com:", "managed:", "ignored:", "per-repo:", "all-repos:"} {
+		if !strings.Contains(stdout.String(), marker) {
+			t.Errorf("stdout missing schema marker %q", marker)
+		}
+	}
+}
+
+func TestRun_Example_OutputFile(t *testing.T) {
+	for _, flag := range []string{"-o", "--output"} {
+		t.Run(flag, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yml")
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"ghsecretman", "example", flag, path}, "dev", &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit: got %d want 0; stderr=%q", code, stderr.String())
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), "github.com:") {
+				t.Fatalf("file missing expected content: %q", data)
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("stdout should be empty when writing to file: %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestRun_Example_RefuseOverwrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "example", "-o", path}, "dev", &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("expected non-zero exit when refusing to overwrite")
+	}
+	if !strings.Contains(stderr.String(), "exists") {
+		t.Errorf("stderr should explain the refusal: %q", stderr.String())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "existing" {
+		t.Fatalf("file should not have been modified: %q", data)
+	}
+}
+
+func TestRun_Example_ForceOverwrite(t *testing.T) {
+	for _, flag := range []string{"-f", "--force"} {
+		t.Run(flag, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yml")
+			if err := os.WriteFile(path, []byte("existing"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"ghsecretman", "example", "-o", path, flag}, "dev", &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit: got %d want 0; stderr=%q", code, stderr.String())
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), "github.com:") {
+				t.Fatalf("file not overwritten with example: %q", data)
+			}
+		})
+	}
+}
