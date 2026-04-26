@@ -72,9 +72,10 @@ func TestForRepoCascade_Matrix(t *testing.T) {
 	t.Parallel()
 
 	type want struct {
-		action            Action
-		fromAllRepos      bool // true → entry should equal all-repos's entry
-		overridesAllRepos bool
+		action                 Action
+		fromAllRepos           bool // true → entry should equal all-repos's entry
+		overridesAllRepos      bool
+		shieldsAllReposManaged bool
 	}
 
 	tests := []struct {
@@ -114,10 +115,12 @@ func TestForRepoCascade_Matrix(t *testing.T) {
 			},
 		},
 		{
-			name:      "per-repo.ignored shields all-repos.managed",
-			allMan:    []string{"X"},
-			repoIg:    []string{"X"},
-			wantNames: map[string]want{"X": {action: ActionIgnored}},
+			name:   "per-repo.ignored shields all-repos.managed",
+			allMan: []string{"X"},
+			repoIg: []string{"X"},
+			wantNames: map[string]want{
+				"X": {action: ActionIgnored, shieldsAllReposManaged: true},
+			},
 		},
 		{
 			name:      "per-repo.managed overrides all-repos.ignored",
@@ -175,6 +178,10 @@ func TestForRepoCascade_Matrix(t *testing.T) {
 				if got.OverridesAllRepos != w.overridesAllRepos {
 					t.Errorf("%s overrides: got %v want %v",
 						name, got.OverridesAllRepos, w.overridesAllRepos)
+				}
+				if got.ShieldsAllReposManaged != w.shieldsAllReposManaged {
+					t.Errorf("%s shields: got %v want %v",
+						name, got.ShieldsAllReposManaged, w.shieldsAllReposManaged)
 				}
 				if w.action == ActionManaged {
 					if got.Entry == nil {
