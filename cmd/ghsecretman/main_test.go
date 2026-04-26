@@ -153,6 +153,20 @@ func swapBackend(t *testing.T, be gh.Backend, beErr error) {
 	t.Cleanup(func() { backendFactory = prev })
 }
 
+func swapTTY(t *testing.T, val bool) {
+	t.Helper()
+	prev := isTTY
+	isTTY = func() bool { return val }
+	t.Cleanup(func() { isTTY = prev })
+}
+
+func swapStdin(t *testing.T, input string) {
+	t.Helper()
+	prev := stdin
+	stdin = strings.NewReader(input)
+	t.Cleanup(func() { stdin = prev })
+}
+
 func TestRun_AuditClean(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := writeCfg(t, dir, `
@@ -353,6 +367,208 @@ github.com:
 	swapBackend(t, &fakeBackend{}, nil)
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"ghsecretman", "apply", "--config", cfgPath, "--org", "example", "--repo", "nope"}, "dev", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit: got %d want 1", code)
+	}
+}
+
+func TestRun_EnforceDryRun_NoWrites(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              value: ok
+`)
+	be := &fakeBackend{vars: map[string]string{"V_EXTRA": "x"}}
+	swapBackend(t, be, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "enforce", "--config", cfgPath, "--org", "example", "--repo", "acme", "--dry-run"},
+		"dev", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d want 0; stderr=%q", code, stderr.String())
+	}
+	if len(be.setVars)+len(be.delVars) != 0 {
+		t.Errorf("dry-run made writes: setVars=%v delVars=%v", be.setVars, be.delVars)
+	}
+	if !strings.Contains(stdout.String(), "would-delete") {
+		t.Errorf("expected would-delete in dry-run output: %q", stdout.String())
+	}
+}
+
+func TestRun_EnforceWithYes_DeletesExtras(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              value: ok
+`)
+	be := &fakeBackend{vars: map[string]string{"V_EXTRA": "x"}}
+	swapBackend(t, be, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "enforce", "--config", cfgPath, "--org", "example", "--repo", "acme", "--yes"},
+		"dev", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if len(be.delVars) != 1 || be.delVars[0] != "V_EXTRA" {
+		t.Errorf("expected V_EXTRA deleted; got %v", be.delVars)
+	}
+	if len(be.setVars) != 1 || be.setVars[0] != "V" {
+		t.Errorf("expected V set; got %v", be.setVars)
+	}
+}
+
+func TestRun_EnforceWithoutYes_NonTTY_Refuses(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed: {}
+`)
+	be := &fakeBackend{}
+	swapBackend(t, be, nil)
+	swapTTY(t, false)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "enforce", "--config", cfgPath, "--org", "example", "--repo", "acme"},
+		"dev", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit when no --yes and stdin is non-TTY")
+	}
+	if !strings.Contains(stderr.String(), "--yes") {
+		t.Errorf("stderr should mention --yes requirement: %q", stderr.String())
+	}
+	if len(be.delVars)+len(be.setVars) != 0 {
+		t.Errorf("no writes should have happened: setVars=%v delVars=%v", be.setVars, be.delVars)
+	}
+}
+
+func TestRun_EnforceTTYPromptYes_Proceeds(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed: {}
+`)
+	be := &fakeBackend{vars: map[string]string{"V_EXTRA": "x"}}
+	swapBackend(t, be, nil)
+	swapTTY(t, true)
+	swapStdin(t, "y\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "enforce", "--config", cfgPath, "--org", "example", "--repo", "acme"},
+		"dev", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if len(be.delVars) != 1 || be.delVars[0] != "V_EXTRA" {
+		t.Errorf("expected V_EXTRA deleted; got %v", be.delVars)
+	}
+	if !strings.Contains(stdout.String(), "V_EXTRA") {
+		t.Errorf("expected prompt to mention V_EXTRA: %q", stdout.String())
+	}
+}
+
+func TestRun_EnforceTTYPromptNo_AbortsWithoutWrites(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed: {}
+`)
+	be := &fakeBackend{vars: map[string]string{"V_EXTRA": "x"}}
+	swapBackend(t, be, nil)
+	swapTTY(t, true)
+	swapStdin(t, "n\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "enforce", "--config", cfgPath, "--org", "example", "--repo", "acme"},
+		"dev", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d want 0", code)
+	}
+	if len(be.delVars)+len(be.setVars) != 0 {
+		t.Errorf("declining at the prompt must skip all writes: setVars=%v delVars=%v",
+			be.setVars, be.delVars)
+	}
+}
+
+func TestRun_EnforceMissingFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "enforce"}, "dev", &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit: got %d want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "required") {
+		t.Fatalf("stderr should mention required: %q", stderr.String())
+	}
+}
+
+func TestRun_EnforceBadConfig(t *testing.T) {
+	swapBackend(t, &fakeBackend{}, nil)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "enforce", "--config", "/no/such/file.yml", "--org", "example", "--repo", "acme", "--yes"},
+		"dev", &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit: got %d want 2", code)
+	}
+}
+
+func TestRun_EnforceBackendError(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed: {}
+`)
+	swapBackend(t, nil, errors.New("no token"))
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "enforce", "--config", cfgPath, "--org", "example", "--repo", "acme", "--yes"},
+		"dev", &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit: got %d want 2", code)
+	}
+}
+
+func TestRun_EnforceBadFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "enforce", "--bogus"}, "dev", &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit: got %d want 2", code)
+	}
+}
+
+func TestRun_EnforceUnknownRepo(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo: {}
+`)
+	swapBackend(t, &fakeBackend{}, nil)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "enforce", "--config", cfgPath, "--org", "example", "--repo", "nope", "--yes"},
+		"dev", &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit: got %d want 1", code)
 	}

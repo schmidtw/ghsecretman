@@ -244,86 +244,108 @@ func EnforceRepo(ctx context.Context, cfg *config.Config, org, repo string, back
 
 	intents := plan.ForRepo(repo, r)
 
-	var resolved map[string]string
-	if !opts.DryRun {
-		var err error
-		resolved, err = resolveAll(intents)
-		if err != nil {
-			return Result{}, err
-		}
-	}
-
-	desiredVars := map[string]string{}
-	for _, in := range intents {
-		if in.Kind == plan.KindVar && in.Action == plan.ActionManaged {
-			desiredVars[in.Name] = resolved[entryKey(in)]
-		}
+	resolved, err := resolveForEnforce(intents, opts.DryRun)
+	if err != nil {
+		return Result{}, err
 	}
 
 	live, err := fetchLive(ctx, backend, org, repo)
 	if err != nil {
 		return Result{}, err
 	}
-	entries := diff.Compute(repo, intents, desiredVars, live, r.Ignored)
+	entries := diff.Compute(repo, intents, desiredVarsFromResolved(intents, resolved), live, r.Ignored)
 
-	if !opts.DryRun && opts.Confirm != nil {
-		extras := make([]string, 0)
-		for _, e := range entries {
-			if e.Status == diff.Extra {
-				extras = append(extras, fmt.Sprintf("%s/%s", e.Kind, e.Name))
-			}
-		}
-		if !opts.Confirm(extras) {
-			return Result{}, nil
-		}
+	if !opts.DryRun && opts.Confirm != nil && !opts.Confirm(extraKindNames(entries)) {
+		return Result{}, nil
 	}
 
-	var actionsKey, depKey *gh.PublicKey
-	if !opts.DryRun {
-		actionsKey, depKey, err = fetchKeys(ctx, backend, org, repo, intents)
-		if err != nil {
-			return Result{}, err
-		}
+	actionsKey, depKey, err := keysForEnforce(ctx, backend, org, repo, intents, opts.DryRun)
+	if err != nil {
+		return Result{}, err
 	}
 
 	fmt.Fprintf(out, "org: %s\nrepo: %s\n", org, repo)
 	res := Result{}
+	res.Failed += runApplyPhase(ctx, backend, org, repo, intents, resolved, actionsKey, depKey, out, opts.DryRun)
+	res.Failed += runDeletePhase(ctx, backend, org, repo, entries, out, opts.DryRun)
+	if res.Failed > 0 {
+		fmt.Fprintf(out, "summary: %d failed\n", res.Failed)
+	}
+	return res, nil
+}
+
+func resolveForEnforce(intents []plan.Intent, dryRun bool) (map[string]string, error) {
+	if dryRun {
+		return nil, nil
+	}
+	return resolveAll(intents)
+}
+
+func keysForEnforce(ctx context.Context, backend gh.Backend, org, repo string, intents []plan.Intent, dryRun bool) (*gh.PublicKey, *gh.PublicKey, error) {
+	if dryRun {
+		return nil, nil, nil
+	}
+	return fetchKeys(ctx, backend, org, repo, intents)
+}
+
+func desiredVarsFromResolved(intents []plan.Intent, resolved map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, in := range intents {
+		if in.Kind == plan.KindVar && in.Action == plan.ActionManaged {
+			out[in.Name] = resolved[entryKey(in)]
+		}
+	}
+	return out
+}
+
+func extraKindNames(entries []diff.Entry) []string {
+	out := make([]string, 0)
+	for _, e := range entries {
+		if e.Status == diff.Extra {
+			out = append(out, fmt.Sprintf("%s/%s", e.Kind, e.Name))
+		}
+	}
+	return out
+}
+
+func runApplyPhase(ctx context.Context, backend gh.Backend, org, repo string, intents []plan.Intent, resolved map[string]string, actionsKey, depKey *gh.PublicKey, out io.Writer, dryRun bool) int {
+	failed := 0
 	for _, in := range intents {
 		if in.Action != plan.ActionManaged {
 			continue
 		}
-		if opts.DryRun {
+		if dryRun {
 			fmt.Fprintf(out, "  %s/%s: would-set\n", in.Kind, in.Name)
 			continue
 		}
 		if err := applyOne(ctx, backend, org, repo, in, resolved[entryKey(in)], actionsKey, depKey); err != nil {
-			res.Failed++
+			failed++
 			fmt.Fprintf(out, "  %s/%s: FAILED: %v\n", in.Kind, in.Name, err)
 			continue
 		}
 		fmt.Fprintf(out, "  %s/%s: ok\n", in.Kind, in.Name)
 	}
+	return failed
+}
 
+func runDeletePhase(ctx context.Context, backend gh.Backend, org, repo string, entries []diff.Entry, out io.Writer, dryRun bool) int {
+	failed := 0
 	for _, e := range entries {
 		if e.Status != diff.Extra {
 			continue
 		}
-		if opts.DryRun {
+		if dryRun {
 			fmt.Fprintf(out, "  %s/%s: would-delete\n", e.Kind, e.Name)
 			continue
 		}
 		if err := deleteOne(ctx, backend, org, repo, e.Kind, e.Name); err != nil {
-			res.Failed++
+			failed++
 			fmt.Fprintf(out, "  %s/%s: FAILED: %v\n", e.Kind, e.Name, err)
 			continue
 		}
 		fmt.Fprintf(out, "  %s/%s: deleted\n", e.Kind, e.Name)
 	}
-
-	if res.Failed > 0 {
-		fmt.Fprintf(out, "summary: %d failed\n", res.Failed)
-	}
-	return res, nil
+	return failed
 }
 
 func deleteOne(ctx context.Context, backend gh.Backend, org, repo string, kind plan.Kind, name string) error {
