@@ -19,9 +19,13 @@ import (
 	"github.com/schmidtw/ghsecretman/internal/resolve"
 )
 
-// Result reports the outcome of a single-repo audit.
+// Result reports the outcome of a single-repo run.
+//
+// Drift is set by AuditRepo. Failed counts per-entry write failures during
+// ApplyRepo (and could be repurposed for enforce later).
 type Result struct {
-	Drift bool
+	Drift  bool
+	Failed int
 }
 
 // AuditRepo runs an audit against a single repo and writes a labeled
@@ -98,6 +102,103 @@ func writeStanza(out io.Writer, org, repo string, entries []diff.Entry, showIgno
 			fmt.Fprintf(out, "  %s/%s: %s\n", e.Kind, e.Name, e.Status)
 		}
 	}
+}
+
+// ApplyRepo writes managed values for a single repo. It never deletes and
+// never touches anything outside the repo's `managed` block. A per-entry
+// "ok" or "FAILED: <err>" line is written for each managed entry; a final
+// summary line is written if any entry failed.
+//
+// The repo's Actions and Dependabot public keys are fetched at most once
+// per call (only when the corresponding section has at least one entry)
+// and reused across all set calls.
+func ApplyRepo(ctx context.Context, cfg *config.Config, org, repo string, backend gh.Backend, out io.Writer) (Result, error) {
+	o, ok := cfg.Org(org)
+	if !ok {
+		return Result{}, fmt.Errorf("org %q not found in config", org)
+	}
+	r, ok := o.PerRepo[repo]
+	if !ok {
+		return Result{}, fmt.Errorf("repo %q not found under org %q", repo, org)
+	}
+
+	intents := plan.ForRepo(repo, r)
+	resolved, err := resolveAll(intents)
+	if err != nil {
+		return Result{}, err
+	}
+
+	actionsKey, depKey, err := fetchKeys(ctx, backend, org, repo, intents)
+	if err != nil {
+		return Result{}, err
+	}
+
+	fmt.Fprintf(out, "org: %s\nrepo: %s\n", org, repo)
+	res := Result{}
+	for _, in := range intents {
+		err := applyOne(ctx, backend, org, repo, in, resolved[entryKey(in)], actionsKey, depKey)
+		if err != nil {
+			res.Failed++
+			fmt.Fprintf(out, "  %s/%s: FAILED: %v\n", in.Kind, in.Name, err)
+			continue
+		}
+		fmt.Fprintf(out, "  %s/%s: ok\n", in.Kind, in.Name)
+	}
+	if res.Failed > 0 {
+		fmt.Fprintf(out, "summary: %d failed\n", res.Failed)
+	}
+	return res, nil
+}
+
+func applyOne(ctx context.Context, backend gh.Backend, org, repo string, in plan.Intent, value string, actionsKey, depKey *gh.PublicKey) error {
+	switch in.Kind {
+	case plan.KindVar:
+		return backend.SetRepoVariable(ctx, org, repo, in.Name, value)
+	case plan.KindSecret:
+		return backend.SetRepoSecret(ctx, org, repo, in.Name, actionsKey, value)
+	case plan.KindDependabot:
+		return backend.SetRepoDependabotSecret(ctx, org, repo, in.Name, depKey, value)
+	}
+	return fmt.Errorf("unknown kind %q", in.Kind)
+}
+
+func resolveAll(intents []plan.Intent) (map[string]string, error) {
+	out := map[string]string{}
+	for _, in := range intents {
+		v, err := resolve.Resolve(in.Entry)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s/%s: %w", in.Kind, in.Name, err)
+		}
+		out[entryKey(in)] = v
+	}
+	return out, nil
+}
+
+func entryKey(in plan.Intent) string { return string(in.Kind) + "/" + in.Name }
+
+func fetchKeys(ctx context.Context, backend gh.Backend, org, repo string, intents []plan.Intent) (actions, dependabot *gh.PublicKey, err error) {
+	needsActions, needsDep := false, false
+	for _, in := range intents {
+		switch in.Kind {
+		case plan.KindSecret:
+			needsActions = true
+		case plan.KindDependabot:
+			needsDep = true
+		}
+	}
+	if needsActions {
+		actions, err = backend.GetRepoPublicKey(ctx, org, repo)
+		if err != nil {
+			return nil, nil, fmt.Errorf("fetch actions public key: %w", err)
+		}
+	}
+	if needsDep {
+		dependabot, err = backend.GetRepoDependabotPublicKey(ctx, org, repo)
+		if err != nil {
+			return nil, nil, fmt.Errorf("fetch dependabot public key: %w", err)
+		}
+	}
+	return actions, dependabot, nil
 }
 
 // writeFile is a thin wrapper used by tests to materialize fixture YAML.
