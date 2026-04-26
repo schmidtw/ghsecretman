@@ -237,8 +237,7 @@ func checkOrgManagedIgnoredConflict(orgName string, s *OrgScope) error {
 
 // decodeOrgManaged parses the org-level managed block.
 //
-//nolint:dupl // structurally similar to decodeManaged but produces OrgManaged
-// (whose entries carry visibility/repos) rather than Managed.
+//nolint:dupl // structurally similar to decodeManaged but produces OrgManaged (whose entries carry visibility/repos) rather than Managed.
 func decodeOrgManaged(baseDir, orgName string, n *yaml.Node) (OrgManaged, error) {
 	var m OrgManaged
 	if n.Kind != yaml.MappingNode {
@@ -413,9 +412,7 @@ func checkManagedIgnoredConflict(repoName string, r *Repo) error {
 
 // decodeManaged parses the repo-level managed block.
 //
-//nolint:dupl // structurally similar to decodeOrgManaged but produces a
-// different type (Managed vs OrgManaged). Refactoring across types adds more
-// indirection than it removes; the two are short and easy to read in place.
+//nolint:dupl // structurally similar to decodeOrgManaged but produces a different type (Managed vs OrgManaged). Refactoring across types adds more indirection than it removes; the two are short and easy to read in place.
 func decodeManaged(baseDir, repoName string, n *yaml.Node) (Managed, error) {
 	var m Managed
 	if n.Kind != yaml.MappingNode {

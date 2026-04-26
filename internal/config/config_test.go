@@ -662,6 +662,296 @@ github.com:
 	}
 }
 
+func TestLoad_SiblingTopLevelKeysIgnored(t *testing.T) {
+	t.Parallel()
+
+	const yml = `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            FOO:
+              value: bar
+
+gitlab.com:
+  groups:
+    - name: platform
+      projects:
+        - foo
+        - bar
+  variables:
+    DUMMY: not-an-object
+    OTHER: 42
+
+safe-settings:
+  organization:
+    repositories:
+      - foo
+      - bar
+    teams:
+      - admins
+  branch_protection:
+    enforce_admins: true
+
+random-tool: hello
+another:
+  - 1
+  - 2
+  - 3
+`
+	cfg, err := LoadBytes([]byte(yml), "/c/secrets.yml")
+	if err != nil {
+		t.Fatalf("unexpected error loading mixed-namespace YAML: %v", err)
+	}
+	org, ok := cfg.Org("example")
+	if !ok {
+		t.Fatalf("github.com.example was not parsed")
+	}
+	repo := org.PerRepo["acme"]
+	if repo == nil {
+		t.Fatalf("github.com.example.per-repo.acme missing")
+	}
+	if got := repo.Managed.Vars["FOO"].Value; got != "bar" {
+		t.Errorf("FOO value: got %q want %q", got, "bar")
+	}
+	if _, ok := cfg.Org("gitlab.com"); ok {
+		t.Errorf("gitlab.com leaked into orgs map")
+	}
+	if _, ok := cfg.Org("safe-settings"); ok {
+		t.Errorf("safe-settings leaked into orgs map")
+	}
+	if _, ok := cfg.Org("random-tool"); ok {
+		t.Errorf("random-tool leaked into orgs map")
+	}
+	if _, ok := cfg.Org("another"); ok {
+		t.Errorf("another leaked into orgs map")
+	}
+	if got := len(cfg.Orgs); got != 1 {
+		t.Errorf("orgs count: got %d want 1; orgs=%v", got, cfg.Orgs)
+	}
+}
+
+func TestLoad_ErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		yml      string
+		mustHave []string
+	}{
+		{
+			name: "unknown key under per-repo entry",
+			yml: `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            FOO:
+              value: bar
+              bogus: 1
+`,
+			mustHave: []string{"managed.vars.FOO", "bogus"},
+		},
+		{
+			name: "unknown key under per-repo managed",
+			yml: `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          oddball:
+            X:
+              value: y
+`,
+			mustHave: []string{"managed", "oddball"},
+		},
+		{
+			name: "unknown key under per-repo block",
+			yml: `
+github.com:
+  example:
+    per-repo:
+      acme:
+        whatzit: {}
+`,
+			mustHave: []string{"acme", "whatzit"},
+		},
+		{
+			name: "unknown key under all-repos entry",
+			yml: `
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          FOO:
+            value: bar
+            bogus: 1
+`,
+			mustHave: []string{"managed.vars.FOO", "bogus"},
+		},
+		{
+			name: "unknown key under org scope entry",
+			yml: `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          FOO:
+            value: bar
+            bogus: 1
+`,
+			mustHave: []string{"org.managed.vars.FOO", "bogus"},
+		},
+		{
+			name: "unknown key under org scope block",
+			yml: `
+github.com:
+  example:
+    org:
+      bogus: {}
+`,
+			mustHave: []string{"example", "bogus"},
+		},
+		{
+			name: "unknown key under per-repo ignored",
+			yml: `
+github.com:
+  example:
+    per-repo:
+      acme:
+        ignored:
+          bogus:
+            - X
+`,
+			mustHave: []string{"ignored", "bogus"},
+		},
+		{
+			name: "wrong type for ignored.vars list",
+			yml: `
+github.com:
+  example:
+    per-repo:
+      acme:
+        ignored:
+          vars: not-a-list
+`,
+			mustHave: []string{"ignored.vars", "list of strings"},
+		},
+		{
+			name: "wrong type for managed block",
+			yml: `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed: not-a-mapping
+`,
+			mustHave: []string{"managed", "mapping"},
+		},
+		{
+			name: "wrong type for org-scope managed block",
+			yml: `
+github.com:
+  example:
+    org:
+      managed: 42
+`,
+			mustHave: []string{"org.managed", "mapping"},
+		},
+		{
+			name: "wrong type for org-entry repos list",
+			yml: `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          FOO:
+            value: x
+            scope: selected
+            repos: nope
+`,
+			mustHave: []string{"repos", "list of strings"},
+		},
+		{
+			name:     "wrong type for top-level document",
+			yml:      "42\n",
+			mustHave: []string{"top-level", "mapping"},
+		},
+		{
+			name: "wrong type for github.com",
+			yml: `
+github.com: 42
+`,
+			mustHave: []string{"github.com", "mapping"},
+		},
+		{
+			name: "wrong type for org node",
+			yml: `
+github.com:
+  example: 42
+`,
+			mustHave: []string{"example", "mapping"},
+		},
+		{
+			name: "wrong type for per-repo block",
+			yml: `
+github.com:
+  example:
+    per-repo: not-a-map
+`,
+			mustHave: []string{"per-repo", "mapping"},
+		},
+		{
+			name: "scalar shorthand under per-repo entry",
+			yml: `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            FOO: bar
+`,
+			mustHave: []string{"managed.vars.FOO", "object form"},
+		},
+		{
+			name: "scalar shorthand under org-scope entry",
+			yml: `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          FOO: bar
+`,
+			mustHave: []string{"org.managed.vars.FOO", "object form"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := LoadBytes([]byte(tc.yml), "/c/secrets.yml")
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			for _, sub := range tc.mustHave {
+				if !strings.Contains(err.Error(), sub) {
+					t.Errorf("error %q does not contain %q", err.Error(), sub)
+				}
+			}
+		})
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
