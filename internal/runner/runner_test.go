@@ -34,12 +34,18 @@ type fakeBackend struct {
 	setSecCalls []setSecretCall
 	setDepCalls []setSecretCall
 
+	delVarCalls []string
+	delSecCalls []string
+	delDepCalls []string
+
 	// keyFetchCount tracks how many times each key fetch endpoint was called.
 	actionsKeyFetches    int
 	dependabotKeyFetches int
 
 	// setErr injects errors for specific (kind, name) pairs.
 	setErr map[string]error
+	// delErr injects errors for specific (kind, name) pairs on delete.
+	delErr map[string]error
 }
 
 type setVarCall struct {
@@ -125,6 +131,36 @@ func (f *fakeBackend) SetRepoDependabotSecret(_ context.Context, owner, repo, na
 		keyID = key.KeyID
 	}
 	f.setDepCalls = append(f.setDepCalls, setSecretCall{owner, repo, name, plaintext, keyID})
+	return nil
+}
+
+func (f *fakeBackend) DeleteRepoVariable(_ context.Context, _, _, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.delErr["vars/"+name]; ok {
+		return e
+	}
+	f.delVarCalls = append(f.delVarCalls, name)
+	return nil
+}
+
+func (f *fakeBackend) DeleteRepoSecret(_ context.Context, _, _, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.delErr["secrets/"+name]; ok {
+		return e
+	}
+	f.delSecCalls = append(f.delSecCalls, name)
+	return nil
+}
+
+func (f *fakeBackend) DeleteRepoDependabotSecret(_ context.Context, _, _, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e, ok := f.delErr["dependabot/"+name]; ok {
+		return e
+	}
+	f.delDepCalls = append(f.delDepCalls, name)
 	return nil
 }
 

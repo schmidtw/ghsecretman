@@ -78,6 +78,10 @@ type fakeBackend struct {
 	setVars       []string
 	setSecrets    []string
 	setDependabot []string
+
+	delVars       []string
+	delSecrets    []string
+	delDependabot []string
 }
 
 func (f *fakeBackend) ListRepoVariables(_ context.Context, _, _ string) (map[string]string, error) {
@@ -110,6 +114,21 @@ func (f *fakeBackend) SetRepoSecret(_ context.Context, _, _, name string, _ *gh.
 
 func (f *fakeBackend) SetRepoDependabotSecret(_ context.Context, _, _, name string, _ *gh.PublicKey, _ string) error {
 	f.setDependabot = append(f.setDependabot, name)
+	return nil
+}
+
+func (f *fakeBackend) DeleteRepoVariable(_ context.Context, _, _, name string) error {
+	f.delVars = append(f.delVars, name)
+	return nil
+}
+
+func (f *fakeBackend) DeleteRepoSecret(_ context.Context, _, _, name string) error {
+	f.delSecrets = append(f.delSecrets, name)
+	return nil
+}
+
+func (f *fakeBackend) DeleteRepoDependabotSecret(_ context.Context, _, _, name string) error {
+	f.delDependabot = append(f.delDependabot, name)
 	return nil
 }
 

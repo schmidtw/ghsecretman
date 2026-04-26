@@ -28,6 +28,10 @@ type Backend interface {
 	SetRepoVariable(ctx context.Context, owner, repo, name, value string) error
 	SetRepoSecret(ctx context.Context, owner, repo, name string, key *PublicKey, plaintext string) error
 	SetRepoDependabotSecret(ctx context.Context, owner, repo, name string, key *PublicKey, plaintext string) error
+
+	DeleteRepoVariable(ctx context.Context, owner, repo, name string) error
+	DeleteRepoSecret(ctx context.Context, owner, repo, name string) error
+	DeleteRepoDependabotSecret(ctx context.Context, owner, repo, name string) error
 }
 
 // Client is the live GitHub backend.
@@ -158,6 +162,30 @@ func (c *Client) SetRepoDependabotSecret(ctx context.Context, owner, repo, name 
 	es := &gogithub.DependabotEncryptedSecret{Name: name, KeyID: key.KeyID, EncryptedValue: enc}
 	if _, err := c.gh.Dependabot.CreateOrUpdateRepoSecret(ctx, owner, repo, es); err != nil {
 		return fmt.Errorf("set repo dependabot secret %s: %w", name, err)
+	}
+	return nil
+}
+
+// DeleteRepoVariable deletes a repo Actions variable.
+func (c *Client) DeleteRepoVariable(ctx context.Context, owner, repo, name string) error {
+	if _, err := c.gh.Actions.DeleteRepoVariable(ctx, owner, repo, name); err != nil {
+		return fmt.Errorf("delete repo variable %s: %w", name, err)
+	}
+	return nil
+}
+
+// DeleteRepoSecret deletes a repo Actions secret.
+func (c *Client) DeleteRepoSecret(ctx context.Context, owner, repo, name string) error {
+	if _, err := c.gh.Actions.DeleteRepoSecret(ctx, owner, repo, name); err != nil {
+		return fmt.Errorf("delete repo secret %s: %w", name, err)
+	}
+	return nil
+}
+
+// DeleteRepoDependabotSecret deletes a repo Dependabot secret.
+func (c *Client) DeleteRepoDependabotSecret(ctx context.Context, owner, repo, name string) error {
+	if _, err := c.gh.Dependabot.DeleteRepoSecret(ctx, owner, repo, name); err != nil {
+		return fmt.Errorf("delete repo dependabot secret %s: %w", name, err)
 	}
 	return nil
 }

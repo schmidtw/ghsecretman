@@ -409,6 +409,105 @@ func TestClient_SetRepoDependabotSecret_APIError(t *testing.T) {
 	}
 }
 
+func TestClient_DeleteRepoVariable(t *testing.T) {
+	t.Parallel()
+	var captured struct{ method, path string }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.method = r.Method
+		captured.path = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+	if err := c.DeleteRepoVariable(context.Background(), "example", "acme", "V"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if captured.method != http.MethodDelete {
+		t.Errorf("method: got %s want DELETE", captured.method)
+	}
+	if captured.path != "/repos/example/acme/actions/variables/V" {
+		t.Errorf("path: %s", captured.path)
+	}
+}
+
+func TestClient_DeleteRepoVariable_Error(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"nope"}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+	if err := c.DeleteRepoVariable(context.Background(), "example", "acme", "V"); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestClient_DeleteRepoSecret(t *testing.T) {
+	t.Parallel()
+	var captured struct{ method, path string }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.method = r.Method
+		captured.path = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+	if err := c.DeleteRepoSecret(context.Background(), "example", "acme", "S"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if captured.method != http.MethodDelete {
+		t.Errorf("method: got %s want DELETE", captured.method)
+	}
+	if captured.path != "/repos/example/acme/actions/secrets/S" {
+		t.Errorf("path: %s", captured.path)
+	}
+}
+
+func TestClient_DeleteRepoSecret_Error(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"nope"}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+	if err := c.DeleteRepoSecret(context.Background(), "example", "acme", "S"); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestClient_DeleteRepoDependabotSecret(t *testing.T) {
+	t.Parallel()
+	var captured struct{ method, path string }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.method = r.Method
+		captured.path = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+	if err := c.DeleteRepoDependabotSecret(context.Background(), "example", "acme", "D"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if captured.method != http.MethodDelete {
+		t.Errorf("method: got %s want DELETE", captured.method)
+	}
+	if captured.path != "/repos/example/acme/dependabot/secrets/D" {
+		t.Errorf("path: %s", captured.path)
+	}
+}
+
+func TestClient_DeleteRepoDependabotSecret_Error(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"nope"}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+	if err := c.DeleteRepoDependabotSecret(context.Background(), "example", "acme", "D"); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 func TestSealAnonymous_Roundtrip(t *testing.T) {
 	t.Parallel()
 	pub, priv := genBoxKeypair(t)
