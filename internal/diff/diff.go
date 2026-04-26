@@ -24,6 +24,21 @@ const (
 	Ignored  Status = "ignored"  // on github and explicitly ignored
 )
 
+// Override records that an entry's effective layer differs from the
+// all-repos default — used by audit to surface layered drift.
+type Override string
+
+const (
+	// OverrideNone is the zero value: no cascade override applies.
+	OverrideNone Override = ""
+	// OverrideManaged indicates a per-repo.managed entry shadowed an
+	// all-repos.managed entry of the same name.
+	OverrideManaged Override = "managed"
+	// OverrideIgnored indicates a per-repo.ignored entry shielded an
+	// all-repos.managed entry of the same name.
+	OverrideIgnored Override = "ignored"
+)
+
 // Live captures observed state for a single repo.
 //
 // Vars is name → value because the GitHub API returns variable values.
@@ -42,6 +57,13 @@ type Entry struct {
 	Status       Status
 	DesiredValue string // populated for Mismatch on vars
 	LiveValue    string // populated for Mismatch on vars
+
+	// Override is non-empty when this entry resolved through a cross-layer
+	// override:
+	//   - OverrideManaged: per-repo.managed shadowed all-repos.managed.
+	//   - OverrideIgnored: per-repo.ignored shielded all-repos.managed.
+	// In both cases the implicit layer pair is per-repo over all-repos.
+	Override Override
 }
 
 // Compute produces diff entries for a single repo.
@@ -61,31 +83,46 @@ func Compute(repo string, intents []plan.Intent, desiredVars map[string]string, 
 
 func computeVars(repo string, intents []plan.Intent, desiredVars map[string]string, live Live, ignored config.Ignored) []Entry {
 	intended := map[string]struct{}{}
+	managedOverride := map[string]struct{}{}
+	ignoredShield := map[string]struct{}{}
 	out := make([]Entry, 0)
 	intentNames := make([]string, 0)
 	for _, in := range intents {
-		if in.Kind != plan.KindVar || in.Action != plan.ActionManaged {
+		if in.Kind != plan.KindVar {
 			continue
 		}
-		intended[in.Name] = struct{}{}
-		intentNames = append(intentNames, in.Name)
+		switch in.Action {
+		case plan.ActionManaged:
+			intended[in.Name] = struct{}{}
+			intentNames = append(intentNames, in.Name)
+			if in.OverridesAllRepos {
+				managedOverride[in.Name] = struct{}{}
+			}
+		case plan.ActionIgnored:
+			if in.ShieldsAllReposManaged {
+				ignoredShield[in.Name] = struct{}{}
+			}
+		}
 	}
 	sort.Strings(intentNames)
 
 	for _, name := range intentNames {
 		desired := desiredVars[name]
+		e := Entry{Repo: repo, Kind: plan.KindVar, Name: name}
+		if _, ok := managedOverride[name]; ok {
+			e.Override = OverrideManaged
+		}
 		if liveVal, ok := live.Vars[name]; ok {
-			status := Match
-			e := Entry{Repo: repo, Kind: plan.KindVar, Name: name, Status: status}
+			e.Status = Match
 			if liveVal != desired {
 				e.Status = Mismatch
 				e.DesiredValue = desired
 				e.LiveValue = liveVal
 			}
-			out = append(out, e)
 		} else {
-			out = append(out, Entry{Repo: repo, Kind: plan.KindVar, Name: name, Status: Missing})
+			e.Status = Missing
 		}
+		out = append(out, e)
 	}
 
 	liveNames := make([]string, 0, len(live.Vars))
@@ -93,29 +130,66 @@ func computeVars(repo string, intents []plan.Intent, desiredVars map[string]stri
 		liveNames = append(liveNames, n)
 	}
 	sort.Strings(liveNames)
+	emittedShield := map[string]struct{}{}
 	for _, name := range liveNames {
 		if _, ok := intended[name]; ok {
 			continue
 		}
-		status := Extra
+		e := Entry{Repo: repo, Kind: plan.KindVar, Name: name, Status: Extra}
 		if slices.Contains(ignored.Vars, name) {
-			status = Ignored
+			e.Status = Ignored
+			if _, shielded := ignoredShield[name]; shielded {
+				e.Override = OverrideIgnored
+				emittedShield[name] = struct{}{}
+			}
 		}
-		out = append(out, Entry{Repo: repo, Kind: plan.KindVar, Name: name, Status: status})
+		out = append(out, e)
+	}
+	// Emit shield-override rows for names that were not on the live target.
+	// The override is a configuration-level fact (per-repo.ignored shielded
+	// all-repos.managed) and is meaningful regardless of live presence.
+	shieldNames := make([]string, 0)
+	for name := range ignoredShield {
+		if _, ok := emittedShield[name]; ok {
+			continue
+		}
+		shieldNames = append(shieldNames, name)
+	}
+	sort.Strings(shieldNames)
+	for _, name := range shieldNames {
+		out = append(out, Entry{
+			Repo:     repo,
+			Kind:     plan.KindVar,
+			Name:     name,
+			Status:   Ignored,
+			Override: OverrideIgnored,
+		})
 	}
 	return out
 }
 
 func computeNames(repo string, kind plan.Kind, intents []plan.Intent, liveNames []string, ignored []string) []Entry {
 	intended := map[string]struct{}{}
+	managedOverride := map[string]struct{}{}
+	ignoredShield := map[string]struct{}{}
 	out := make([]Entry, 0)
 	intentNames := make([]string, 0)
 	for _, in := range intents {
-		if in.Kind != kind || in.Action != plan.ActionManaged {
+		if in.Kind != kind {
 			continue
 		}
-		intended[in.Name] = struct{}{}
-		intentNames = append(intentNames, in.Name)
+		switch in.Action {
+		case plan.ActionManaged:
+			intended[in.Name] = struct{}{}
+			intentNames = append(intentNames, in.Name)
+			if in.OverridesAllRepos {
+				managedOverride[in.Name] = struct{}{}
+			}
+		case plan.ActionIgnored:
+			if in.ShieldsAllReposManaged {
+				ignoredShield[in.Name] = struct{}{}
+			}
+		}
 	}
 	sort.Strings(intentNames)
 	liveSet := map[string]struct{}{}
@@ -124,23 +198,50 @@ func computeNames(repo string, kind plan.Kind, intents []plan.Intent, liveNames 
 	}
 
 	for _, name := range intentNames {
-		if _, ok := liveSet[name]; ok {
-			out = append(out, Entry{Repo: repo, Kind: kind, Name: name, Status: Present})
-		} else {
-			out = append(out, Entry{Repo: repo, Kind: kind, Name: name, Status: Missing})
+		e := Entry{Repo: repo, Kind: kind, Name: name}
+		if _, ok := managedOverride[name]; ok {
+			e.Override = OverrideManaged
 		}
+		if _, ok := liveSet[name]; ok {
+			e.Status = Present
+		} else {
+			e.Status = Missing
+		}
+		out = append(out, e)
 	}
 	sortedLive := append([]string(nil), liveNames...)
 	sort.Strings(sortedLive)
+	emittedShield := map[string]struct{}{}
 	for _, name := range sortedLive {
 		if _, ok := intended[name]; ok {
 			continue
 		}
-		status := Extra
+		e := Entry{Repo: repo, Kind: kind, Name: name, Status: Extra}
 		if slices.Contains(ignored, name) {
-			status = Ignored
+			e.Status = Ignored
+			if _, shielded := ignoredShield[name]; shielded {
+				e.Override = OverrideIgnored
+				emittedShield[name] = struct{}{}
+			}
 		}
-		out = append(out, Entry{Repo: repo, Kind: kind, Name: name, Status: status})
+		out = append(out, e)
+	}
+	shieldNames := make([]string, 0)
+	for name := range ignoredShield {
+		if _, ok := emittedShield[name]; ok {
+			continue
+		}
+		shieldNames = append(shieldNames, name)
+	}
+	sort.Strings(shieldNames)
+	for _, name := range shieldNames {
+		out = append(out, Entry{
+			Repo:     repo,
+			Kind:     kind,
+			Name:     name,
+			Status:   Ignored,
+			Override: OverrideIgnored,
+		})
 	}
 	return out
 }
