@@ -56,6 +56,30 @@ github.com:
           dependabot: []
     # variables and secrets to set/audit for all repos.  This generally will
     # be replace by org level secrets, but this is still valuable to control.
+    #
+    # IMPORTANT — repo iteration is opt-in:
+    # ghsecretman only enumerates the org's repositories when the YAML has
+    # either an `all-repos:` block or a `per-repo:` block for that repo.
+    # Without either, audit/apply/enforce do not look at any repo, and
+    # existing repo-level secrets/variables are invisible to the tool.
+    #
+    # If you only intend to manage org-level objects but also want
+    # repo-level cruft cleaned up, include an empty `all-repos:` block:
+    #
+    #     all-repos:
+    #       managed:
+    #         vars: {}
+    #         secrets: {}
+    #         dependabot: {}
+    #       ignored:
+    #         vars: []
+    #         secrets: []
+    #         dependabot: []
+    #
+    # With nothing under `managed`, every existing repo-level entry is
+    # reported as `extra` by audit and DELETED by enforce. Run
+    # `ghsecretman enforce --dry-run` first to confirm the list before
+    # letting deletes fire.
     all-repos:
       # These secrets are managed by this location & will always be made to
       # match this value.

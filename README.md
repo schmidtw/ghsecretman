@@ -56,6 +56,8 @@ The full YAML schema (`org`, `per-repo`, `all-repos`, `managed`, `ignored`, valu
 
 Top-level keys other than `github.com:` are ignored, so the same file can carry sections owned by other tools.
 
+**Repo iteration is opt-in.** ghsecretman only enumerates an org's repositories when the YAML has either an `all-repos:` block or a `per-repo:` block for that repo. Without either, repo-level secrets/variables are invisible to the tool. If you only intend to manage org-level objects but also want existing repo-level cruft cleaned up, include an empty `all-repos:` block (empty `managed` maps and empty `ignored` lists). With nothing under `managed`, every existing repo-level entry is reported as `extra` by `audit` and deleted by `enforce`. Run `ghsecretman enforce --dry-run` first to confirm the list before letting deletes fire.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
