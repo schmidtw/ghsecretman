@@ -1856,6 +1856,111 @@ github.com:
 	}
 }
 
+// TestAuditRepo_ManagedOverrideRow asserts that when a per-repo.managed
+// entry shadows an all-repos.managed entry, audit emits an override row
+// for that repo identifying both layers, regardless of the underlying
+// match/mismatch/missing status.
+func TestAuditRepo_ManagedOverrideRow(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          V_MATCH:
+            value: shared
+          V_MISS:
+            value: shared
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V_MATCH:
+              value: acme-match
+            V_MISS:
+              value: acme-miss
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{vars: map[string]string{"V_MATCH": "acme-match"}}
+	var out bytes.Buffer
+	if _, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &out, false); err != nil {
+		t.Fatal(err)
+	}
+	s := out.String()
+	for _, want := range []string{
+		"V_MATCH: match override(per-repo>all-repos)",
+		"V_MISS: missing",
+		"override(per-repo>all-repos)",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("expected override marker %q in output:\n%s", want, s)
+		}
+	}
+}
+
+// TestAuditRepo_IgnoredOverrideRow asserts that when a per-repo.ignored
+// entry shields an all-repos.managed entry, audit emits an
+// "override (ignored)" row when --show-ignored is set, and is silent
+// about the override otherwise.
+func TestAuditRepo_IgnoredOverrideRow(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          V_SHIELD:
+            value: shared
+    per-repo:
+      acme:
+        ignored:
+          vars:
+            - V_SHIELD
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Without --show-ignored: silent about V_SHIELD even though it shielded
+	// an all-repos.managed entry.
+	be := &fakeBackend{}
+	var quiet bytes.Buffer
+	if _, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &quiet, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(quiet.String(), "V_SHIELD") {
+		t.Errorf("ignored override should be silent without --show-ignored; got:\n%s", quiet.String())
+	}
+
+	// With --show-ignored: an "override (ignored)" row that names both layers.
+	var loud bytes.Buffer
+	if _, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &loud, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"V_SHIELD: override (ignored)",
+		"per-repo>all-repos.managed",
+	} {
+		if !strings.Contains(loud.String(), want) {
+			t.Errorf("expected %q in --show-ignored output:\n%s", want, loud.String())
+		}
+	}
+}
+
 // gatedBackend extends fakeBackend with a per-call gate. Every call to
 // ListRepoVariables increments inFlight (then decrements on return) and
 // observes maxInFlight, letting tests assert that no more than the

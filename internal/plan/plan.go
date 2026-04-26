@@ -46,6 +46,12 @@ type Intent struct {
 	// audit-side override reporting; runtime behavior is unaffected.
 	OverridesAllRepos bool
 
+	// ShieldsAllReposManaged is true when this is an ActionIgnored intent
+	// produced by per-repo.ignored shielding an all-repos.managed entry.
+	// Reserved for audit-side override reporting; runtime behavior is
+	// unaffected.
+	ShieldsAllReposManaged bool
+
 	// IsOrg distinguishes an org-level intent (different GitHub object class)
 	// from a repo-level intent. When true, Repo is empty and the entry is
 	// targeted at the named organization.
@@ -122,9 +128,10 @@ func ForRepoCascade(repoName string, allRepos, perRepo *config.Repo) []Intent {
 }
 
 type cascadeWinner struct {
-	action            Action
-	entry             *config.Entry
-	overridesAllRepos bool
+	action                 Action
+	entry                  *config.Entry
+	overridesAllRepos      bool
+	shieldsAllReposManaged bool
 }
 
 func appendCascadeKind(out []Intent, repo string, kind Kind, allRepos, perRepo *config.Repo) []Intent {
@@ -151,9 +158,11 @@ func appendCascadeKind(out []Intent, repo string, kind Kind, allRepos, perRepo *
 		})
 	}
 	for _, n := range ignoredNames {
+		w := resolved[n]
 		out = append(out, Intent{
 			Repo: repo, Kind: kind, Name: n,
-			Action: ActionIgnored,
+			Action:                 ActionIgnored,
+			ShieldsAllReposManaged: w.shieldsAllReposManaged,
 		})
 	}
 	return out
@@ -176,7 +185,11 @@ func resolveCascade(allRepos, perRepo *config.Repo, kind Kind) map[string]cascad
 		if _, ok := resolved[n]; ok {
 			continue
 		}
-		resolved[n] = cascadeWinner{action: ActionIgnored}
+		w := cascadeWinner{action: ActionIgnored}
+		if _, hits := arMan[n]; hits {
+			w.shieldsAllReposManaged = true
+		}
+		resolved[n] = w
 	}
 	for n, e := range arMan {
 		if _, ok := resolved[n]; ok {
