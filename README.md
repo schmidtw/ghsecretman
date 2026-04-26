@@ -4,6 +4,58 @@ A tool for managing GitHub Actions secrets, Actions variables, and Dependabot se
 
 See the design and full requirements in [PRD #1](https://github.com/schmidtw/ghsecretman/issues/1).
 
+## Install
+
+Pre-built binaries for darwin and linux on amd64 and arm64 are attached to each release on the [Releases page](https://github.com/schmidtw/ghsecretman/releases). Each release also publishes a `*-checksums.txt` file with SHA-512 sums of every artifact.
+
+```sh
+# Pick the asset that matches your platform, then:
+tar xzf ghsecretman-<version>-<os>-<arch>.tar.gz
+sudo install ghsecretman-<version>-<os>-<arch>/ghsecretman /usr/local/bin/
+```
+
+To build from source:
+
+```sh
+go install github.com/schmidtw/ghsecretman/cmd/ghsecretman@latest
+```
+
+`ghsecretman version` prints the version, commit, and build date stamped in at release time.
+
+## Quick Start
+
+`ghsecretman` authenticates with a personal access token from `GITHUB_TOKEN` (preferred) or `GH_TOKEN`. The token needs the scopes required to read and write the secrets/variables you list in the YAML.
+
+A minimal config (`secrets.yml`) for an `audit` against one repo:
+
+```yaml
+github.com:
+  example-org:
+    per-repo:
+      example-repo:
+        managed:
+          vars:
+            APP_ENV:
+              value: production
+```
+
+Run a read-only audit:
+
+```sh
+export GITHUB_TOKEN=ghp_...
+ghsecretman audit --config secrets.yml --org example-org --repo example-repo
+```
+
+`audit` exits non-zero if any drift is found, so it is safe to run from CI as a drift detector. To write managed values, use `apply`; to also delete unlisted values, use `enforce` (which requires `--yes` for the destructive path or supports `--dry-run` for review).
+
+Omit `--repo` to iterate every repo in the org concurrently; `--concurrency` bounds the worker pool.
+
+## Configuration
+
+The full YAML schema (`org`, `per-repo`, `all-repos`, `managed`, `ignored`, value sources, precedence rules, `org`-level `scope`/`repos`) is documented in [PRD #1](https://github.com/schmidtw/ghsecretman/issues/1). A complete annotated example lives in [`example.yml`](example.yml).
+
+Top-level keys other than `github.com:` are ignored, so the same file can carry sections owned by other tools.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
