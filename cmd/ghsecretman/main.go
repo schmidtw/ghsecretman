@@ -6,13 +6,11 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	"github.com/schmidtw/ghsecretman/internal/config"
 	gh "github.com/schmidtw/ghsecretman/internal/github"
@@ -30,19 +28,6 @@ var (
 
 // backendFactory is overridden in tests to inject a fake backend.
 var backendFactory = func() (gh.Backend, error) { return gh.NewClientFromEnv() }
-
-// isTTY reports whether stdin is connected to a terminal. It is a package
-// variable so tests can override the answer without manipulating fds.
-var isTTY = func() bool {
-	fi, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return (fi.Mode() & os.ModeCharDevice) != 0
-}
-
-// stdin is the prompt source. Overridable for tests.
-var stdin io.Reader = os.Stdin
 
 func main() {
 	os.Exit(run(os.Args, version, os.Stdout, os.Stderr))
@@ -151,7 +136,6 @@ func runEnforce(args []string, stdout, stderr io.Writer) int {
 	org := fs.String("org", "", "GitHub organization name")
 	repo := fs.String("repo", "", "single repo to enforce; omit to iterate every repo in the org")
 	dryRun := fs.Bool("dry-run", false, "print intended writes and deletes; make no API write calls")
-	yes := fs.Bool("yes", false, "proceed without confirmation prompt")
 	concurrency := fs.Int("concurrency", runner.DefaultConcurrency, "max repos processed in parallel for org-wide runs")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -173,35 +157,12 @@ func runEnforce(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	opts, code := buildEnforceOptions(*org, *repo, *dryRun, *yes, stdout, stderr)
-	if code != 0 {
-		return code
-	}
-	opts.Concurrency = *concurrency
+	opts := runner.EnforceOptions{DryRun: *dryRun, Concurrency: *concurrency}
 
 	if *repo != "" {
 		return runEnforceRepo(cfg, *org, *repo, backend, opts, stdout, stderr)
 	}
 	return runEnforceOrg(cfg, *org, backend, opts, stdout, stderr)
-}
-
-func buildEnforceOptions(org, repo string, dryRun, yes bool, stdout, stderr io.Writer) (runner.EnforceOptions, int) {
-	opts := runner.EnforceOptions{DryRun: dryRun}
-	if dryRun || yes {
-		return opts, 0
-	}
-	if !isTTY() {
-		fmt.Fprintln(stderr, "enforce: refusing to run on non-interactive stdin without --yes")
-		return opts, 2
-	}
-	target := repo
-	if target == "" {
-		target = "all repos in " + org
-	}
-	opts.Confirm = func(extras []string) bool {
-		return promptDeletions(stdin, stdout, org, target, extras)
-	}
-	return opts, 0
 }
 
 func runEnforceRepo(cfg *config.Config, org, repo string, backend gh.Backend, opts runner.EnforceOptions, stdout, stderr io.Writer) int {
@@ -226,21 +187,6 @@ func runEnforceOrg(cfg *config.Config, org string, backend gh.Backend, opts runn
 		return 1
 	}
 	return 0
-}
-
-func promptDeletions(in io.Reader, out io.Writer, org, repo string, extras []string) bool {
-	fmt.Fprintf(out, "About to delete %d entries on %s/%s:\n", len(extras), org, repo)
-	for _, x := range extras {
-		fmt.Fprintf(out, "  - %s\n", x)
-	}
-	fmt.Fprint(out, "Proceed? [y/N]: ")
-	r := bufio.NewReader(in)
-	line, err := r.ReadString('\n')
-	if err != nil && line == "" {
-		return false
-	}
-	line = strings.TrimSpace(strings.ToLower(line))
-	return line == "y" || line == "yes"
 }
 
 func runAudit(args []string, stdout, stderr io.Writer) int {

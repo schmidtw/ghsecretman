@@ -46,7 +46,7 @@ export GITHUB_TOKEN=ghp_...
 ghsecretman audit --config secrets.yml --org example-org --repo example-repo
 ```
 
-`audit` exits non-zero if any drift is found, so it is safe to run from CI as a drift detector. To write managed values, use `apply`; to also delete unlisted values, use `enforce` (which requires `--yes` for the destructive path or supports `--dry-run` for review).
+`audit` exits non-zero if any drift is found, so it is safe to run from CI as a drift detector. To write managed values, use `apply`; to also delete unlisted values, use `enforce`. Run `enforce --dry-run` first to review what would change before letting deletes fire.
 
 Omit `--repo` to iterate every repo in the org concurrently; `--concurrency` bounds the worker pool.
 
