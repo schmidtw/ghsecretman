@@ -274,22 +274,12 @@ type EnforceOptions struct {
 	// Concurrency bounds org-wide enforce iteration the same way
 	// OrgOptions.Concurrency does for Audit/Apply.
 	Concurrency int
-
-	// Confirm, if non-nil and DryRun is false, is invoked after the live
-	// state has been fetched and the extras list computed. The argument
-	// is a list of "kind/name" strings, one per planned deletion. If
-	// Confirm returns false, no writes or deletes are performed and
-	// Result is the zero value. Confirm is ignored when DryRun is true.
-	Confirm func(extras []string) bool
 }
 
 // EnforceRepo applies managed values and then deletes any "extra" entries
 // — entries present on the repo but not listed in either the managed or
 // ignored block. With DryRun=true, it prints intended set/delete lines
 // without calling any write API.
-//
-// The TTY/--yes confirmation contract is owned by the CLI layer; by the
-// time EnforceRepo is called, the caller has already decided to proceed.
 func EnforceRepo(ctx context.Context, cfg *config.Config, org, repo string, backend gh.Backend, out io.Writer, opts EnforceOptions) (Result, error) {
 	o, perRepo, err := lookupTarget(cfg, org, repo)
 	if err != nil {
@@ -309,10 +299,6 @@ func EnforceRepo(ctx context.Context, cfg *config.Config, org, repo string, back
 	}
 	effIgnored := plan.EffectiveIgnored(o.AllRepos, perRepo)
 	entries := diff.Compute(repo, intents, desiredVarsFromResolved(intents, resolved), live, effIgnored)
-
-	if !opts.DryRun && opts.Confirm != nil && !opts.Confirm(extraKindNames(entries)) {
-		return Result{}, nil
-	}
 
 	actionsKey, depKey, err := keysForEnforce(ctx, backend, org, repo, intents, opts.DryRun)
 	if err != nil {
@@ -348,16 +334,6 @@ func desiredVarsFromResolved(intents []plan.Intent, resolved map[string]string) 
 	for _, in := range intents {
 		if in.Kind == plan.KindVar && in.Action == plan.ActionManaged {
 			out[in.Name] = resolved[entryKey(in)]
-		}
-	}
-	return out
-}
-
-func extraKindNames(entries []diff.Entry) []string {
-	out := make([]string, 0)
-	for _, e := range entries {
-		if e.Status == diff.Extra {
-			out = append(out, fmt.Sprintf("%s/%s", e.Kind, e.Name))
 		}
 	}
 	return out
@@ -787,9 +763,7 @@ func resolveSelectedRepoIDs(ctx context.Context, backend gh.Backend, org string,
 
 // EnforceOrgScope applies org-level managed entries, then deletes extras.
 //
-// With DryRun=true, no write API calls are made. Confirm is invoked exactly
-// once with the list of planned deletions; if it returns false, neither the
-// apply nor the delete phase runs.
+// With DryRun=true, no write API calls are made.
 func EnforceOrgScope(ctx context.Context, cfg *config.Config, orgName string, backend gh.Backend, out io.Writer, opts EnforceOptions) (Result, error) {
 	o, ok := cfg.Org(orgName)
 	if !ok {
@@ -809,10 +783,6 @@ func EnforceOrgScope(ctx context.Context, cfg *config.Config, orgName string, ba
 	}
 	effIgnored := plan.EffectiveOrgIgnored(o.OrgScope)
 	entries := diff.Compute("", intents, desiredVarsFromResolved(intents, resolved), live, effIgnored)
-
-	if !opts.DryRun && opts.Confirm != nil && !opts.Confirm(extraKindNames(entries)) {
-		return Result{}, nil
-	}
 
 	var (
 		idsByIntent map[string][]int64
