@@ -77,6 +77,7 @@ func runEnforce(args []string, stdout, stderr io.Writer) int {
 	repo := fs.String("repo", "", "single repo to enforce; omit to iterate every repo in the org")
 	dryRun := fs.Bool("dry-run", false, "print intended writes and deletes; make no API write calls")
 	yes := fs.Bool("yes", false, "proceed without confirmation prompt")
+	concurrency := fs.Int("concurrency", runner.DefaultConcurrency, "max repos processed in parallel for org-wide runs")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -101,6 +102,7 @@ func runEnforce(args []string, stdout, stderr io.Writer) int {
 	if code != 0 {
 		return code
 	}
+	opts.Concurrency = *concurrency
 
 	if *repo != "" {
 		return runEnforceRepo(cfg, *org, *repo, backend, opts, stdout, stderr)
@@ -173,6 +175,7 @@ func runAudit(args []string, stdout, stderr io.Writer) int {
 	org := fs.String("org", "", "GitHub organization name")
 	repo := fs.String("repo", "", "single repo to audit; omit to iterate every repo in the org")
 	showIgnored := fs.Bool("show-ignored", false, "include ignored entries in output")
+	concurrency := fs.Int("concurrency", runner.DefaultConcurrency, "max repos processed in parallel for org-wide runs")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -205,7 +208,7 @@ func runAudit(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	res, err := runner.Audit(context.Background(), cfg, *org, backend, stdout, *showIgnored)
+	res, err := runner.Audit(context.Background(), cfg, *org, backend, stdout, *showIgnored, runner.OrgOptions{Concurrency: *concurrency})
 	if err != nil {
 		fmt.Fprintf(stderr, "audit: %v\n", err)
 		return 1
@@ -222,6 +225,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	cfgPath := fs.String("config", "", "path to YAML config file")
 	org := fs.String("org", "", "GitHub organization name")
 	repo := fs.String("repo", "", "single repo to apply; omit to iterate every repo in the org")
+	concurrency := fs.Int("concurrency", runner.DefaultConcurrency, "max repos processed in parallel for org-wide runs")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -254,7 +258,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	res, err := runner.Apply(context.Background(), cfg, *org, backend, stdout)
+	res, err := runner.Apply(context.Background(), cfg, *org, backend, stdout, runner.OrgOptions{Concurrency: *concurrency})
 	if err != nil {
 		fmt.Fprintf(stderr, "apply: %v\n", err)
 		return 1

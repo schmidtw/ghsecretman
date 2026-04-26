@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	gh "github.com/schmidtw/ghsecretman/internal/github"
@@ -77,6 +78,7 @@ type fakeBackend struct {
 	secrets    []string
 	dependabot []string
 
+	mu            sync.Mutex
 	setVars       []string
 	setSecrets    []string
 	setDependabot []string
@@ -109,31 +111,43 @@ func (f *fakeBackend) GetRepoDependabotPublicKey(_ context.Context, _, _ string)
 }
 
 func (f *fakeBackend) SetRepoVariable(_ context.Context, _, _, name, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.setVars = append(f.setVars, name)
 	return nil
 }
 
 func (f *fakeBackend) SetRepoSecret(_ context.Context, _, _, name string, _ *gh.PublicKey, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.setSecrets = append(f.setSecrets, name)
 	return nil
 }
 
 func (f *fakeBackend) SetRepoDependabotSecret(_ context.Context, _, _, name string, _ *gh.PublicKey, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.setDependabot = append(f.setDependabot, name)
 	return nil
 }
 
 func (f *fakeBackend) DeleteRepoVariable(_ context.Context, _, _, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.delVars = append(f.delVars, name)
 	return nil
 }
 
 func (f *fakeBackend) DeleteRepoSecret(_ context.Context, _, _, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.delSecrets = append(f.delSecrets, name)
 	return nil
 }
 
 func (f *fakeBackend) DeleteRepoDependabotSecret(_ context.Context, _, _, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.delDependabot = append(f.delDependabot, name)
 	return nil
 }
