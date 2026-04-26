@@ -74,14 +74,14 @@ func runEnforce(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", "", "path to YAML config file")
 	org := fs.String("org", "", "GitHub organization name")
-	repo := fs.String("repo", "", "single repo to enforce")
+	repo := fs.String("repo", "", "single repo to enforce; omit to iterate every repo in the org")
 	dryRun := fs.Bool("dry-run", false, "print intended writes and deletes; make no API write calls")
 	yes := fs.Bool("yes", false, "proceed without confirmation prompt")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *cfgPath == "" || *org == "" || *repo == "" {
-		fmt.Fprintln(stderr, "enforce: --config, --org, and --repo are required")
+	if *cfgPath == "" || *org == "" {
+		fmt.Fprintln(stderr, "enforce: --config and --org are required")
 		return 2
 	}
 
@@ -97,23 +97,55 @@ func runEnforce(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	opts := runner.EnforceOptions{DryRun: *dryRun}
-	if !*dryRun && !*yes {
-		if !isTTY() {
-			fmt.Fprintln(stderr, "enforce: refusing to run on non-interactive stdin without --yes")
-			return 2
-		}
-		opts.Confirm = func(extras []string) bool {
-			return promptDeletions(stdin, stdout, *org, *repo, extras)
-		}
+	opts, code := buildEnforceOptions(*org, *repo, *dryRun, *yes, stdout, stderr)
+	if code != 0 {
+		return code
 	}
 
-	res, err := runner.EnforceRepo(context.Background(), cfg, *org, *repo, backend, stdout, opts)
+	if *repo != "" {
+		return runEnforceRepo(cfg, *org, *repo, backend, opts, stdout, stderr)
+	}
+	return runEnforceOrg(cfg, *org, backend, opts, stdout, stderr)
+}
+
+func buildEnforceOptions(org, repo string, dryRun, yes bool, stdout, stderr io.Writer) (runner.EnforceOptions, int) {
+	opts := runner.EnforceOptions{DryRun: dryRun}
+	if dryRun || yes {
+		return opts, 0
+	}
+	if !isTTY() {
+		fmt.Fprintln(stderr, "enforce: refusing to run on non-interactive stdin without --yes")
+		return opts, 2
+	}
+	target := repo
+	if target == "" {
+		target = "all repos in " + org
+	}
+	opts.Confirm = func(extras []string) bool {
+		return promptDeletions(stdin, stdout, org, target, extras)
+	}
+	return opts, 0
+}
+
+func runEnforceRepo(cfg *config.Config, org, repo string, backend gh.Backend, opts runner.EnforceOptions, stdout, stderr io.Writer) int {
+	res, err := runner.EnforceRepo(context.Background(), cfg, org, repo, backend, stdout, opts)
 	if err != nil {
 		fmt.Fprintf(stderr, "enforce: %v\n", err)
 		return 1
 	}
 	if res.Failed > 0 {
+		return 1
+	}
+	return 0
+}
+
+func runEnforceOrg(cfg *config.Config, org string, backend gh.Backend, opts runner.EnforceOptions, stdout, stderr io.Writer) int {
+	res, err := runner.Enforce(context.Background(), cfg, org, backend, stdout, opts)
+	if err != nil {
+		fmt.Fprintf(stderr, "enforce: %v\n", err)
+		return 1
+	}
+	if res.FailedEntries > 0 || res.FailedRepos > 0 {
 		return 1
 	}
 	return 0
@@ -139,13 +171,13 @@ func runAudit(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", "", "path to YAML config file")
 	org := fs.String("org", "", "GitHub organization name")
-	repo := fs.String("repo", "", "single repo to audit")
+	repo := fs.String("repo", "", "single repo to audit; omit to iterate every repo in the org")
 	showIgnored := fs.Bool("show-ignored", false, "include ignored entries in output")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *cfgPath == "" || *org == "" || *repo == "" {
-		fmt.Fprintln(stderr, "audit: --config, --org, and --repo are required")
+	if *cfgPath == "" || *org == "" {
+		fmt.Fprintln(stderr, "audit: --config and --org are required")
 		return 2
 	}
 
@@ -161,12 +193,24 @@ func runAudit(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	res, err := runner.AuditRepo(context.Background(), cfg, *org, *repo, backend, stdout, *showIgnored)
+	if *repo != "" {
+		res, err := runner.AuditRepo(context.Background(), cfg, *org, *repo, backend, stdout, *showIgnored)
+		if err != nil {
+			fmt.Fprintf(stderr, "audit: %v\n", err)
+			return 1
+		}
+		if res.Drift {
+			return 1
+		}
+		return 0
+	}
+
+	res, err := runner.Audit(context.Background(), cfg, *org, backend, stdout, *showIgnored)
 	if err != nil {
 		fmt.Fprintf(stderr, "audit: %v\n", err)
 		return 1
 	}
-	if res.Drift {
+	if res.Drift || res.FailedRepos > 0 {
 		return 1
 	}
 	return 0
@@ -177,12 +221,12 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", "", "path to YAML config file")
 	org := fs.String("org", "", "GitHub organization name")
-	repo := fs.String("repo", "", "single repo to apply")
+	repo := fs.String("repo", "", "single repo to apply; omit to iterate every repo in the org")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *cfgPath == "" || *org == "" || *repo == "" {
-		fmt.Fprintln(stderr, "apply: --config, --org, and --repo are required")
+	if *cfgPath == "" || *org == "" {
+		fmt.Fprintln(stderr, "apply: --config and --org are required")
 		return 2
 	}
 
@@ -198,12 +242,24 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	res, err := runner.ApplyRepo(context.Background(), cfg, *org, *repo, backend, stdout)
+	if *repo != "" {
+		res, err := runner.ApplyRepo(context.Background(), cfg, *org, *repo, backend, stdout)
+		if err != nil {
+			fmt.Fprintf(stderr, "apply: %v\n", err)
+			return 1
+		}
+		if res.Failed > 0 {
+			return 1
+		}
+		return 0
+	}
+
+	res, err := runner.Apply(context.Background(), cfg, *org, backend, stdout)
 	if err != nil {
 		fmt.Fprintf(stderr, "apply: %v\n", err)
 		return 1
 	}
-	if res.Failed > 0 {
+	if res.FailedEntries > 0 || res.FailedRepos > 0 {
 		return 1
 	}
 	return 0

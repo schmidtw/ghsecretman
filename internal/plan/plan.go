@@ -108,48 +108,14 @@ func ForRepoCascade(repoName string, allRepos, perRepo *config.Repo) []Intent {
 	return out
 }
 
+type cascadeWinner struct {
+	action            Action
+	entry             *config.Entry
+	overridesAllRepos bool
+}
+
 func appendCascadeKind(out []Intent, repo string, kind Kind, allRepos, perRepo *config.Repo) []Intent {
-	prMan, prIg := managedFor(perRepo, kind), ignoredFor(perRepo, kind)
-	arMan, arIg := managedFor(allRepos, kind), ignoredFor(allRepos, kind)
-
-	prIgSet := stringSet(prIg)
-
-	type winner struct {
-		action  Action
-		entry   *config.Entry
-		overrid bool
-	}
-	resolved := map[string]winner{}
-
-	for n, e := range prMan {
-		w := winner{action: ActionManaged, entry: e}
-		if _, ok := arMan[n]; ok {
-			w.overrid = true
-		}
-		resolved[n] = w
-	}
-	for _, n := range prIg {
-		if _, ok := resolved[n]; ok {
-			continue
-		}
-		resolved[n] = winner{action: ActionIgnored}
-	}
-	for n, e := range arMan {
-		if _, ok := resolved[n]; ok {
-			continue
-		}
-		if _, shielded := prIgSet[n]; shielded {
-			continue
-		}
-		resolved[n] = winner{action: ActionManaged, entry: e}
-	}
-	for _, n := range arIg {
-		if _, ok := resolved[n]; ok {
-			continue
-		}
-		resolved[n] = winner{action: ActionIgnored}
-	}
-
+	resolved := resolveCascade(allRepos, perRepo, kind)
 	managedNames := make([]string, 0)
 	ignoredNames := make([]string, 0)
 	for n, w := range resolved {
@@ -168,7 +134,7 @@ func appendCascadeKind(out []Intent, repo string, kind Kind, allRepos, perRepo *
 			Repo: repo, Kind: kind, Name: n,
 			Action:            ActionManaged,
 			Entry:             w.entry,
-			OverridesAllRepos: w.overrid,
+			OverridesAllRepos: w.overridesAllRepos,
 		})
 	}
 	for _, n := range ignoredNames {
@@ -178,6 +144,43 @@ func appendCascadeKind(out []Intent, repo string, kind Kind, allRepos, perRepo *
 		})
 	}
 	return out
+}
+
+func resolveCascade(allRepos, perRepo *config.Repo, kind Kind) map[string]cascadeWinner {
+	prMan, prIg := managedFor(perRepo, kind), ignoredFor(perRepo, kind)
+	arMan, arIg := managedFor(allRepos, kind), ignoredFor(allRepos, kind)
+	prIgSet := stringSet(prIg)
+	resolved := map[string]cascadeWinner{}
+
+	for n, e := range prMan {
+		w := cascadeWinner{action: ActionManaged, entry: e}
+		if _, ok := arMan[n]; ok {
+			w.overridesAllRepos = true
+		}
+		resolved[n] = w
+	}
+	for _, n := range prIg {
+		if _, ok := resolved[n]; ok {
+			continue
+		}
+		resolved[n] = cascadeWinner{action: ActionIgnored}
+	}
+	for n, e := range arMan {
+		if _, ok := resolved[n]; ok {
+			continue
+		}
+		if _, shielded := prIgSet[n]; shielded {
+			continue
+		}
+		resolved[n] = cascadeWinner{action: ActionManaged, entry: e}
+	}
+	for _, n := range arIg {
+		if _, ok := resolved[n]; ok {
+			continue
+		}
+		resolved[n] = cascadeWinner{action: ActionIgnored}
+	}
+	return resolved
 }
 
 func managedFor(r *config.Repo, kind Kind) map[string]*config.Entry {

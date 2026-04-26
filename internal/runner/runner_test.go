@@ -1274,6 +1274,421 @@ github.com:
 	}
 }
 
+func TestAudit_IteratesEveryOrgRepo(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          ALL_VAR:
+            value: ok
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{
+		orgRepos: []string{"acme", "beta"},
+		vars:     map[string]string{"ALL_VAR": "ok"},
+	}
+	var out bytes.Buffer
+	res, err := Audit(context.Background(), cfg, "example", be, &out, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Drift {
+		t.Errorf("expected no drift; got:\n%s", out.String())
+	}
+	if res.OkRepos != 2 || res.FailedRepos != 0 {
+		t.Errorf("repo counts: ok=%d failed=%d (want ok=2 failed=0)",
+			res.OkRepos, res.FailedRepos)
+	}
+	s := out.String()
+	for _, want := range []string{"repo: acme", "repo: beta", "summary: ok=2 failed=0"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("output missing %q\n--\n%s", want, s)
+		}
+	}
+}
+
+func TestAudit_SkipsReposNotInConfig(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              value: ok
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{
+		orgRepos: []string{"acme", "unrelated"},
+		vars:     map[string]string{"V": "ok"},
+	}
+	var out bytes.Buffer
+	res, err := Audit(context.Background(), cfg, "example", be, &out, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OkRepos != 1 {
+		t.Errorf("ok repos: got %d want 1 (unrelated should be skipped)", res.OkRepos)
+	}
+	if strings.Contains(out.String(), "repo: unrelated") {
+		t.Errorf("unrelated repo should not appear in output:\n%s", out.String())
+	}
+}
+
+func TestAudit_PerRepoErrorContinues(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          V:
+            value: ok
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Backend errors on repo list calls; every repo errors uniformly.
+	be := &fakeBackend{
+		orgRepos: []string{"a", "b"},
+		err:      errors.New("boom"),
+	}
+	var out bytes.Buffer
+	res, err := Audit(context.Background(), cfg, "example", be, &out, false)
+	if err != nil {
+		t.Fatalf("Audit should continue on per-repo error, not return one: %v", err)
+	}
+	if res.FailedRepos != 2 || res.OkRepos != 0 {
+		t.Errorf("got ok=%d failed=%d; want ok=0 failed=2", res.OkRepos, res.FailedRepos)
+	}
+	s := out.String()
+	if !strings.Contains(s, "ERROR: ") {
+		t.Errorf("expected ERROR line in output:\n%s", s)
+	}
+	if !strings.Contains(s, "summary: ok=0 failed=2") {
+		t.Errorf("expected summary line: %q", s)
+	}
+}
+
+func TestAudit_ListOrgReposError(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    all-repos:
+      managed: {}
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{orgReposErr: errors.New("forbidden")}
+	if _, err := Audit(context.Background(), cfg, "example", be, &bytes.Buffer{}, false); err == nil {
+		t.Fatal("expected error when ListOrgRepos fails")
+	}
+}
+
+func TestAudit_UnknownOrg(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Orgs: map[string]*config.Org{}}
+	if _, err := Audit(context.Background(), cfg, "missing", &fakeBackend{}, &bytes.Buffer{}, false); err == nil {
+		t.Fatal("expected error for unknown org")
+	}
+}
+
+func TestApply_IteratesAndAppliesCascade(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          ALL_VAR:
+            value: shared
+    per-repo:
+      acme:
+        managed:
+          vars:
+            ALL_VAR:
+              value: acme-override
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{orgRepos: []string{"acme", "beta"}}
+	var out bytes.Buffer
+	res, err := Apply(context.Background(), cfg, "example", be, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OkRepos != 2 {
+		t.Errorf("ok repos: %d", res.OkRepos)
+	}
+	wantValues := map[string]string{
+		"acme": "acme-override",
+		"beta": "shared",
+	}
+	got := map[string]string{}
+	for _, c := range be.setVarCalls {
+		got[c.repo] = c.value
+	}
+	for r, v := range wantValues {
+		if got[r] != v {
+			t.Errorf("repo %s: got %q want %q (per-repo > all-repos)", r, got[r], v)
+		}
+	}
+}
+
+func TestApply_UnknownOrg(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Orgs: map[string]*config.Org{}}
+	if _, err := Apply(context.Background(), cfg, "missing", &fakeBackend{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestApply_ListOrgReposError(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Orgs: map[string]*config.Org{
+		"example": {AllRepos: &config.Repo{}},
+	}}
+	be := &fakeBackend{orgReposErr: errors.New("boom")}
+	if _, err := Apply(context.Background(), cfg, "example", be, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestEnforce_IteratesDryRun(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          KEEP:
+            value: ok
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{
+		orgRepos: []string{"acme", "beta"},
+		vars:     map[string]string{"EXTRA": "x"},
+	}
+	var out bytes.Buffer
+	if _, err := Enforce(context.Background(), cfg, "example", be, &out, EnforceOptions{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(be.setVarCalls)+len(be.delVarCalls) != 0 {
+		t.Errorf("dry-run made writes: sets=%v dels=%v", be.setVarCalls, be.delVarCalls)
+	}
+	s := out.String()
+	for _, want := range []string{"repo: acme", "repo: beta", "would-set", "would-delete"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("output missing %q\n--\n%s", want, s)
+		}
+	}
+}
+
+func TestEnforce_UnknownOrg(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Orgs: map[string]*config.Org{}}
+	if _, err := Enforce(context.Background(), cfg, "missing", &fakeBackend{}, &bytes.Buffer{}, EnforceOptions{}); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestEnforce_ListOrgReposError(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Orgs: map[string]*config.Org{
+		"example": {AllRepos: &config.Repo{}},
+	}}
+	be := &fakeBackend{orgReposErr: errors.New("boom")}
+	if _, err := Enforce(context.Background(), cfg, "example", be, &bytes.Buffer{}, EnforceOptions{}); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+// TestAuditRepo_AllReposOnly asserts that when a repo has no per-repo entry
+// but the org defines all-repos, the per-repo audit still proceeds via
+// cascade.
+func TestAuditRepo_AllReposOnly(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          V:
+            value: shared
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{vars: map[string]string{"V": "shared"}}
+	res, err := AuditRepo(context.Background(), cfg, "example", "any-repo", be, &bytes.Buffer{}, false)
+	if err != nil {
+		t.Fatalf("repo with no per-repo entry should still audit when all-repos exists: %v", err)
+	}
+	if res.Drift {
+		t.Errorf("expected no drift")
+	}
+}
+
+// TestApplyRepo_PerRepoOverridesAllRepos asserts that the cascade path
+// honors per-repo > all-repos at the apply layer.
+func TestApplyRepo_PerRepoOverridesAllRepos(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          V:
+            value: shared
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              value: acme-only
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{}
+	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(be.setVarCalls) != 1 || be.setVarCalls[0].value != "acme-only" {
+		t.Errorf("expected acme-only; got %+v", be.setVarCalls)
+	}
+}
+
+// TestApplyRepo_AllReposShieldedByPerRepoIgnored asserts that per-repo's
+// ignored list shields the repo from an all-repos.managed write.
+func TestApplyRepo_AllReposShieldedByPerRepoIgnored(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          V:
+            value: shared
+    per-repo:
+      acme:
+        ignored:
+          vars:
+            - V
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{}
+	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(be.setVarCalls) != 0 {
+		t.Errorf("per-repo.ignored must shield against all-repos.managed; got writes: %+v",
+			be.setVarCalls)
+	}
+}
+
+// TestApplyRepo_PerRepoManagedOverridesAllReposIgnored asserts that a
+// per-repo.managed entry rescues a name from all-repos.ignored.
+func TestApplyRepo_PerRepoManagedOverridesAllReposIgnored(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    all-repos:
+      ignored:
+        vars:
+          - V
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              value: acme-explicit
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{}
+	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(be.setVarCalls) != 1 || be.setVarCalls[0].value != "acme-explicit" {
+		t.Errorf("per-repo.managed must override all-repos.ignored; got %+v", be.setVarCalls)
+	}
+}
+
 func TestAuditRepo_ShowIgnored(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

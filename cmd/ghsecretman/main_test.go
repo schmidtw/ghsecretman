@@ -580,6 +580,110 @@ github.com:
 	}
 }
 
+func TestRun_AuditOrgWide_NoRepoFlag(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          V:
+            value: ok
+`)
+	be := &fakeBackend{
+		orgRepos: []string{"a", "b"},
+		vars:     map[string]string{"V": "ok"},
+	}
+	swapBackend(t, be, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "audit", "--config", cfgPath, "--org", "example"}, "dev", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d want 0; stderr=%q\nstdout=%q", code, stderr.String(), stdout.String())
+	}
+	for _, want := range []string{"repo: a", "repo: b", "summary: ok=2"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout missing %q\n--\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestRun_ApplyOrgWide_NoRepoFlag(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          V:
+            value: ok
+`)
+	be := &fakeBackend{orgRepos: []string{"a", "b"}}
+	swapBackend(t, be, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "apply", "--config", cfgPath, "--org", "example"}, "dev", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d want 0; stderr=%q\nstdout=%q", code, stderr.String(), stdout.String())
+	}
+	if len(be.setVars) != 2 {
+		t.Errorf("expected V set on each of 2 repos; got %v", be.setVars)
+	}
+}
+
+func TestRun_EnforceOrgWide_DryRun_NoRepoFlag(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          V:
+            value: ok
+`)
+	be := &fakeBackend{orgRepos: []string{"a", "b"}, vars: map[string]string{"EXTRA": "x"}}
+	swapBackend(t, be, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "enforce", "--config", cfgPath, "--org", "example", "--dry-run"},
+		"dev", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d want 0; stderr=%q", code, stderr.String())
+	}
+	if len(be.setVars)+len(be.delVars) != 0 {
+		t.Errorf("dry-run made writes")
+	}
+	for _, want := range []string{"would-set", "would-delete", "summary: ok=2"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout missing %q\n--\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestRun_AuditOrgWide_DriftReturnsOne(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    all-repos:
+      managed:
+        vars:
+          V:
+            value: yaml
+`)
+	be := &fakeBackend{orgRepos: []string{"a"}, vars: map[string]string{"V": "live"}}
+	swapBackend(t, be, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "audit", "--config", cfgPath, "--org", "example"}, "dev", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit: got %d want 1", code)
+	}
+}
+
 type failVarBackend struct {
 	fakeBackend
 }
