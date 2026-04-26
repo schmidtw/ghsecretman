@@ -155,7 +155,7 @@ func decodeRepo(baseDir, orgName, repoName string, n *yaml.Node) (*Repo, error) 
 		val := n.Content[i+1]
 		switch key {
 		case "managed":
-			m, err := decodeManaged(baseDir, orgName, repoName, val)
+			m, err := decodeManaged(baseDir, repoName, val)
 			if err != nil {
 				return nil, err
 			}
@@ -170,10 +170,34 @@ func decodeRepo(baseDir, orgName, repoName string, n *yaml.Node) (*Repo, error) 
 			return nil, fmt.Errorf("repo %q: unknown key %q", repoName, key)
 		}
 	}
+	if err := checkManagedIgnoredConflict(repoName, repo); err != nil {
+		return nil, err
+	}
 	return repo, nil
 }
 
-func decodeManaged(baseDir, orgName, repoName string, n *yaml.Node) (Managed, error) {
+func checkManagedIgnoredConflict(repoName string, r *Repo) error {
+	conflicts := []struct {
+		section string
+		managed map[string]*Entry
+		ignored []string
+	}{
+		{"vars", r.Managed.Vars, r.Ignored.Vars},
+		{"secrets", r.Managed.Secrets, r.Ignored.Secrets},
+		{"dependabot", r.Managed.Dependabot, r.Ignored.Dependabot},
+	}
+	for _, c := range conflicts {
+		for _, name := range c.ignored {
+			if _, ok := c.managed[name]; ok {
+				return fmt.Errorf("repo %q: %q appears in both managed.%s and ignored.%s",
+					repoName, name, c.section, c.section)
+			}
+		}
+	}
+	return nil
+}
+
+func decodeManaged(baseDir, repoName string, n *yaml.Node) (Managed, error) {
 	var m Managed
 	if n.Kind != yaml.MappingNode {
 		return m, fmt.Errorf("repo %q: managed must be a mapping", repoName)
@@ -183,19 +207,19 @@ func decodeManaged(baseDir, orgName, repoName string, n *yaml.Node) (Managed, er
 		val := n.Content[i+1]
 		switch key {
 		case "vars":
-			entries, err := decodeEntries(baseDir, orgName, repoName, "vars", val)
+			entries, err := decodeEntries(baseDir, repoName, "vars", val)
 			if err != nil {
 				return m, err
 			}
 			m.Vars = entries
 		case "secrets":
-			entries, err := decodeEntries(baseDir, orgName, repoName, "secrets", val)
+			entries, err := decodeEntries(baseDir, repoName, "secrets", val)
 			if err != nil {
 				return m, err
 			}
 			m.Secrets = entries
 		case "dependabot":
-			entries, err := decodeEntries(baseDir, orgName, repoName, "dependabot", val)
+			entries, err := decodeEntries(baseDir, repoName, "dependabot", val)
 			if err != nil {
 				return m, err
 			}
@@ -207,7 +231,7 @@ func decodeManaged(baseDir, orgName, repoName string, n *yaml.Node) (Managed, er
 	return m, nil
 }
 
-func decodeEntries(baseDir, orgName, repoName, section string, n *yaml.Node) (map[string]*Entry, error) {
+func decodeEntries(baseDir, repoName, section string, n *yaml.Node) (map[string]*Entry, error) {
 	if n.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("repo %q: managed.%s must be a mapping", repoName, section)
 	}

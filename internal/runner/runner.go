@@ -61,7 +61,7 @@ func AuditRepo(ctx context.Context, cfg *config.Config, org, repo string, backen
 func resolveVars(intents []plan.Intent) (map[string]string, error) {
 	out := map[string]string{}
 	for _, in := range intents {
-		if in.Kind != plan.KindVar {
+		if in.Kind != plan.KindVar || in.Action != plan.ActionManaged {
 			continue
 		}
 		v, err := resolve.Resolve(in.Entry)
@@ -136,6 +136,9 @@ func ApplyRepo(ctx context.Context, cfg *config.Config, org, repo string, backen
 	fmt.Fprintf(out, "org: %s\nrepo: %s\n", org, repo)
 	res := Result{}
 	for _, in := range intents {
+		if in.Action != plan.ActionManaged {
+			continue
+		}
 		err := applyOne(ctx, backend, org, repo, in, resolved[entryKey(in)], actionsKey, depKey)
 		if err != nil {
 			res.Failed++
@@ -165,6 +168,9 @@ func applyOne(ctx context.Context, backend gh.Backend, org, repo string, in plan
 func resolveAll(intents []plan.Intent) (map[string]string, error) {
 	out := map[string]string{}
 	for _, in := range intents {
+		if in.Action != plan.ActionManaged {
+			continue
+		}
 		v, err := resolve.Resolve(in.Entry)
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s/%s: %w", in.Kind, in.Name, err)
@@ -179,6 +185,9 @@ func entryKey(in plan.Intent) string { return string(in.Kind) + "/" + in.Name }
 func fetchKeys(ctx context.Context, backend gh.Backend, org, repo string, intents []plan.Intent) (actions, dependabot *gh.PublicKey, err error) {
 	needsActions, needsDep := false, false
 	for _, in := range intents {
+		if in.Action != plan.ActionManaged {
+			continue
+		}
 		switch in.Kind {
 		case plan.KindSecret:
 			needsActions = true

@@ -735,6 +735,75 @@ github.com:
 	}
 }
 
+// TestApplyRepo_DoesNotWriteIgnored asserts that names listed in the
+// per-repo `ignored` block are never set, even when no managed entry of
+// the same name exists. The fake backend records every Set call, so any
+// write to an ignored name would show up here.
+func TestApplyRepo_DoesNotWriteIgnored(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "secrets.yml")
+	if err := writeFile(cfgPath, []byte(`
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V_ON:
+              value: ok
+          secrets:
+            S_ON:
+              value: ok
+          dependabot:
+            D_ON:
+              value: ok
+        ignored:
+          vars:
+            - V_OFF
+          secrets:
+            - S_OFF
+          dependabot:
+            - D_OFF
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &fakeBackend{}
+	var out bytes.Buffer
+	res, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &out)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Failed != 0 {
+		t.Errorf("expected zero failures, got %d", res.Failed)
+	}
+	for _, c := range be.setVarCalls {
+		if c.name == "V_OFF" {
+			t.Errorf("ignored var V_OFF must not be written; got %+v", c)
+		}
+	}
+	for _, c := range be.setSecCalls {
+		if c.name == "S_OFF" {
+			t.Errorf("ignored secret S_OFF must not be written; got %+v", c)
+		}
+	}
+	for _, c := range be.setDepCalls {
+		if c.name == "D_OFF" {
+			t.Errorf("ignored dependabot D_OFF must not be written; got %+v", c)
+		}
+	}
+	s := out.String()
+	for _, name := range []string{"V_OFF", "S_OFF", "D_OFF"} {
+		if strings.Contains(s, name) {
+			t.Errorf("apply output should not mention ignored name %q; got:\n%s", name, s)
+		}
+	}
+}
+
 func TestAuditRepo_ShowIgnored(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

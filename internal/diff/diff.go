@@ -64,7 +64,7 @@ func computeVars(repo string, intents []plan.Intent, desiredVars map[string]stri
 	out := make([]Entry, 0)
 	intentNames := make([]string, 0)
 	for _, in := range intents {
-		if in.Kind != plan.KindVar {
+		if in.Kind != plan.KindVar || in.Action != plan.ActionManaged {
 			continue
 		}
 		intended[in.Name] = struct{}{}
@@ -111,7 +111,7 @@ func computeNames(repo string, kind plan.Kind, intents []plan.Intent, liveNames 
 	out := make([]Entry, 0)
 	intentNames := make([]string, 0)
 	for _, in := range intents {
-		if in.Kind != kind {
+		if in.Kind != kind || in.Action != plan.ActionManaged {
 			continue
 		}
 		intended[in.Name] = struct{}{}

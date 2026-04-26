@@ -226,6 +226,70 @@ github.com:
 `,
 			errSubstr: "list of strings",
 		},
+		{
+			name: "managed and ignored conflict: vars",
+			yml: `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            DUP:
+              value: x
+        ignored:
+          vars:
+            - DUP
+`,
+			errSubstr: "DUP",
+		},
+		{
+			name: "managed and ignored conflict: secrets",
+			yml: `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          secrets:
+            DUP:
+              value: x
+        ignored:
+          secrets:
+            - DUP
+`,
+			errSubstr: "DUP",
+		},
+		{
+			name: "managed and ignored conflict: dependabot",
+			yml: `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          dependabot:
+            DUP:
+              value: x
+        ignored:
+          dependabot:
+            - DUP
+`,
+			errSubstr: "DUP",
+		},
+		{
+			name: "unknown key in ignored",
+			yml: `
+github.com:
+  example:
+    per-repo:
+      acme:
+        ignored:
+          bogus:
+            - X
+`,
+			errSubstr: "unknown",
+		},
 	}
 
 	for _, tc := range tests {

@@ -67,6 +67,38 @@ func TestCompute_SecretsAndDependabot(t *testing.T) {
 	checkEntries(t, got, want)
 }
 
+func TestCompute_SkipIntentsDoNotCountAsIntended(t *testing.T) {
+	t.Parallel()
+	// A skip-intent (Action=ActionIgnored) for IG_VAR must not make the
+	// diff treat IG_VAR as an intended write: the live IG_VAR should be
+	// reported as Ignored, not Match/Mismatch/Missing.
+	intents := []plan.Intent{
+		{Repo: "acme", Kind: plan.KindVar, Name: "IG_VAR", Action: plan.ActionIgnored},
+		{Repo: "acme", Kind: plan.KindSecret, Name: "IG_SEC", Action: plan.ActionIgnored},
+		{Repo: "acme", Kind: plan.KindDependabot, Name: "IG_DEP", Action: plan.ActionIgnored},
+	}
+	live := Live{
+		Vars:       map[string]string{"IG_VAR": "v"},
+		Secrets:    []string{"IG_SEC"},
+		Dependabot: []string{"IG_DEP"},
+	}
+	ig := config.Ignored{
+		Vars:       []string{"IG_VAR"},
+		Secrets:    []string{"IG_SEC"},
+		Dependabot: []string{"IG_DEP"},
+	}
+	got := Compute("acme", intents, nil, live, ig)
+	want := map[string]Status{
+		"vars/IG_VAR":       Ignored,
+		"secrets/IG_SEC":    Ignored,
+		"dependabot/IG_DEP": Ignored,
+	}
+	checkEntries(t, got, want)
+	if HasDrift(got) {
+		t.Errorf("ignored entries should not register as drift")
+	}
+}
+
 func TestCompute_IgnoredSuppressesExtra(t *testing.T) {
 	t.Parallel()
 	live := Live{
