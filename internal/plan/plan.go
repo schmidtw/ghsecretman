@@ -91,6 +91,157 @@ func appendKind(out []Intent, repo string, kind Kind, m map[string]*config.Entry
 	return out
 }
 
+// ForRepoCascade returns intents for one repo after applying the
+// per-repo > all-repos precedence rules.
+//
+// Rules (per kind, per name):
+//   - In per-repo.managed → managed (per-repo entry).
+//     Marked OverridesAllRepos when the same name was also in all-repos.managed.
+//   - In per-repo.ignored → ignored.
+//   - In all-repos.managed (and not above) → managed (all-repos entry).
+//   - In all-repos.ignored (and not above) → ignored.
+func ForRepoCascade(repoName string, allRepos, perRepo *config.Repo) []Intent {
+	out := make([]Intent, 0)
+	out = appendCascadeKind(out, repoName, KindVar, allRepos, perRepo)
+	out = appendCascadeKind(out, repoName, KindSecret, allRepos, perRepo)
+	out = appendCascadeKind(out, repoName, KindDependabot, allRepos, perRepo)
+	return out
+}
+
+func appendCascadeKind(out []Intent, repo string, kind Kind, allRepos, perRepo *config.Repo) []Intent {
+	prMan, prIg := managedFor(perRepo, kind), ignoredFor(perRepo, kind)
+	arMan, arIg := managedFor(allRepos, kind), ignoredFor(allRepos, kind)
+
+	prIgSet := stringSet(prIg)
+
+	type winner struct {
+		action  Action
+		entry   *config.Entry
+		overrid bool
+	}
+	resolved := map[string]winner{}
+
+	for n, e := range prMan {
+		w := winner{action: ActionManaged, entry: e}
+		if _, ok := arMan[n]; ok {
+			w.overrid = true
+		}
+		resolved[n] = w
+	}
+	for _, n := range prIg {
+		if _, ok := resolved[n]; ok {
+			continue
+		}
+		resolved[n] = winner{action: ActionIgnored}
+	}
+	for n, e := range arMan {
+		if _, ok := resolved[n]; ok {
+			continue
+		}
+		if _, shielded := prIgSet[n]; shielded {
+			continue
+		}
+		resolved[n] = winner{action: ActionManaged, entry: e}
+	}
+	for _, n := range arIg {
+		if _, ok := resolved[n]; ok {
+			continue
+		}
+		resolved[n] = winner{action: ActionIgnored}
+	}
+
+	managedNames := make([]string, 0)
+	ignoredNames := make([]string, 0)
+	for n, w := range resolved {
+		if w.action == ActionManaged {
+			managedNames = append(managedNames, n)
+		} else {
+			ignoredNames = append(ignoredNames, n)
+		}
+	}
+	sort.Strings(managedNames)
+	sort.Strings(ignoredNames)
+
+	for _, n := range managedNames {
+		w := resolved[n]
+		out = append(out, Intent{
+			Repo: repo, Kind: kind, Name: n,
+			Action:            ActionManaged,
+			Entry:             w.entry,
+			OverridesAllRepos: w.overrid,
+		})
+	}
+	for _, n := range ignoredNames {
+		out = append(out, Intent{
+			Repo: repo, Kind: kind, Name: n,
+			Action: ActionIgnored,
+		})
+	}
+	return out
+}
+
+func managedFor(r *config.Repo, kind Kind) map[string]*config.Entry {
+	if r == nil {
+		return nil
+	}
+	switch kind {
+	case KindVar:
+		return r.Managed.Vars
+	case KindSecret:
+		return r.Managed.Secrets
+	case KindDependabot:
+		return r.Managed.Dependabot
+	}
+	return nil
+}
+
+func ignoredFor(r *config.Repo, kind Kind) []string {
+	if r == nil {
+		return nil
+	}
+	switch kind {
+	case KindVar:
+		return r.Ignored.Vars
+	case KindSecret:
+		return r.Ignored.Secrets
+	case KindDependabot:
+		return r.Ignored.Dependabot
+	}
+	return nil
+}
+
+func stringSet(ss []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(ss))
+	for _, s := range ss {
+		out[s] = struct{}{}
+	}
+	return out
+}
+
+// EffectiveIgnored returns the cascaded ignored list at a single repo.
+//
+// Useful for downstream code (diff) that needs an ignored set for marking
+// extras. A name is effectively ignored when it ends up in an ActionIgnored
+// intent under ForRepoCascade.
+func EffectiveIgnored(allRepos, perRepo *config.Repo) config.Ignored {
+	intents := ForRepoCascade("", allRepos, perRepo)
+	var out config.Ignored
+	for _, in := range intents {
+		if in.Action != ActionIgnored {
+			continue
+		}
+		switch in.Kind {
+		case KindVar:
+			out.Vars = append(out.Vars, in.Name)
+		case KindSecret:
+			out.Secrets = append(out.Secrets, in.Name)
+		case KindDependabot:
+			out.Dependabot = append(out.Dependabot, in.Name)
+		}
+	}
+	return out
+}
+
 // IsIgnored reports whether name appears in the repo's ignored list for kind.
 func IsIgnored(r *config.Repo, kind Kind, name string) bool {
 	if r == nil {
