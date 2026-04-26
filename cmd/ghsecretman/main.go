@@ -32,6 +32,8 @@ func run(args []string, ver string, stdout, stderr io.Writer) int {
 		switch args[1] {
 		case "audit":
 			return runAudit(args[2:], stdout, stderr)
+		case "apply":
+			return runApply(args[2:], stdout, stderr)
 		}
 	}
 
@@ -46,7 +48,7 @@ func run(args []string, ver string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	fmt.Fprintln(stderr, "usage: ghsecretman audit --config <path> --org <name> --repo <name>")
+	fmt.Fprintln(stderr, "usage: ghsecretman <audit|apply> --config <path> --org <name> --repo <name>")
 	return 2
 }
 
@@ -83,6 +85,43 @@ func runAudit(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if res.Drift {
+		return 1
+	}
+	return 0
+}
+
+func runApply(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	cfgPath := fs.String("config", "", "path to YAML config file")
+	org := fs.String("org", "", "GitHub organization name")
+	repo := fs.String("repo", "", "single repo to apply")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *cfgPath == "" || *org == "" || *repo == "" {
+		fmt.Fprintln(stderr, "apply: --config, --org, and --repo are required")
+		return 2
+	}
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "load config: %v\n", err)
+		return 2
+	}
+
+	backend, err := backendFactory()
+	if err != nil {
+		fmt.Fprintf(stderr, "github: %v\n", err)
+		return 2
+	}
+
+	res, err := runner.ApplyRepo(context.Background(), cfg, *org, *repo, backend, stdout)
+	if err != nil {
+		fmt.Fprintf(stderr, "apply: %v\n", err)
+		return 1
+	}
+	if res.Failed > 0 {
 		return 1
 	}
 	return 0

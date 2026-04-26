@@ -238,3 +238,134 @@ func TestRun_AuditBadFlag(t *testing.T) {
 		t.Fatalf("exit: got %d want 2", code)
 	}
 }
+
+func TestRun_ApplySuccess(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              value: ok
+          secrets:
+            S:
+              value: secret
+          dependabot:
+            D:
+              value: dep
+`)
+	be := &fakeBackend{}
+	swapBackend(t, be, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "apply", "--config", cfgPath, "--org", "example", "--repo", "acme"}, "dev", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if len(be.setVars) != 1 || be.setVars[0] != "V" {
+		t.Errorf("setVars: %v", be.setVars)
+	}
+	if len(be.setSecrets) != 1 || be.setSecrets[0] != "S" {
+		t.Errorf("setSecrets: %v", be.setSecrets)
+	}
+	if len(be.setDependabot) != 1 || be.setDependabot[0] != "D" {
+		t.Errorf("setDependabot: %v", be.setDependabot)
+	}
+	if !strings.Contains(stdout.String(), "vars/V: ok") {
+		t.Errorf("stdout missing per-entry ok line: %q", stdout.String())
+	}
+}
+
+func TestRun_ApplyMissingFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "apply"}, "dev", &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit: got %d want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "required") {
+		t.Fatalf("stderr should mention required: %q", stderr.String())
+	}
+}
+
+func TestRun_ApplyBadConfig(t *testing.T) {
+	swapBackend(t, &fakeBackend{}, nil)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "apply", "--config", "/no/such/file.yml", "--org", "example", "--repo", "acme"}, "dev", &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit: got %d want 2", code)
+	}
+}
+
+func TestRun_ApplyBackendError(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed: {}
+`)
+	swapBackend(t, nil, errors.New("no token"))
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "apply", "--config", cfgPath, "--org", "example", "--repo", "acme"}, "dev", &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit: got %d want 2", code)
+	}
+}
+
+func TestRun_ApplyBadFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "apply", "--bogus"}, "dev", &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit: got %d want 2", code)
+	}
+}
+
+func TestRun_ApplyUnknownRepo(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo: {}
+`)
+	swapBackend(t, &fakeBackend{}, nil)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "apply", "--config", cfgPath, "--org", "example", "--repo", "nope"}, "dev", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit: got %d want 1", code)
+	}
+}
+
+type failVarBackend struct {
+	fakeBackend
+}
+
+func (f *failVarBackend) SetRepoVariable(_ context.Context, _, _, _, _ string) error {
+	return errors.New("rate limit")
+}
+
+func TestRun_ApplyEntryFailureReturnsOne(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          vars:
+            V:
+              value: ok
+`)
+	swapBackend(t, &failVarBackend{}, nil)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "apply", "--config", cfgPath, "--org", "example", "--repo", "acme"}, "dev", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit: got %d want 1; stdout=%q", code, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "vars/V: FAILED") {
+		t.Errorf("stdout missing FAILED line: %q", stdout.String())
+	}
+}

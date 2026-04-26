@@ -122,7 +122,7 @@ func TestNewClientFromEnv_NoToken(t *testing.T) {
 func TestClient_GetRepoPublicKey(t *testing.T) {
 	t.Parallel()
 	srv, c := newTestClient(t, map[string]string{
-		"/repos/example/acme/actions/secrets/public-key": `{"key_id":"kid-actions","key":"AAAA"}`,
+		"/repos/example/acme/actions/secrets/public-key": `{"key_id":"kid-actions","key":"AAAA"}`, // #nosec G101 -- fixture, no credentials
 	})
 	defer srv.Close()
 
@@ -138,7 +138,7 @@ func TestClient_GetRepoPublicKey(t *testing.T) {
 func TestClient_GetRepoDependabotPublicKey(t *testing.T) {
 	t.Parallel()
 	srv, c := newTestClient(t, map[string]string{
-		"/repos/example/acme/dependabot/secrets/public-key": `{"key_id":"kid-dep","key":"BBBB"}`,
+		"/repos/example/acme/dependabot/secrets/public-key": `{"key_id":"kid-dep","key":"BBBB"}`, // #nosec G101 -- fixture, no credentials
 	})
 	defer srv.Close()
 
