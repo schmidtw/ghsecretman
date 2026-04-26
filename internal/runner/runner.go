@@ -129,13 +129,37 @@ func writeStanza(out io.Writer, org, repo string, entries []diff.Entry, showIgno
 		if e.Status == diff.Ignored && !showIgnored {
 			continue
 		}
-		switch e.Status {
-		case diff.Mismatch:
-			fmt.Fprintf(out, "  %s/%s: mismatch (yaml=%q live=%q)\n", e.Kind, e.Name, e.DesiredValue, e.LiveValue)
-		default:
-			fmt.Fprintf(out, "  %s/%s: %s\n", e.Kind, e.Name, e.Status)
-		}
+		writeEntryLine(out, e)
 	}
+}
+
+// writeEntryLine renders a single diff Entry. Cross-layer overrides are
+// surfaced inline so audit output makes layered drift visible:
+//
+//   - Override=OverrideManaged: append " override(per-repo>all-repos)"
+//     to the regular status line. Example:
+//     "  vars/X: match override(per-repo>all-repos)"
+//     "  vars/X: mismatch (yaml="a" live="b") override(per-repo>all-repos)"
+//
+//   - Override=OverrideIgnored: replace the bare "ignored" status with
+//     "override (ignored) (per-repo>all-repos.managed)". The caller is
+//     responsible for honoring --show-ignored.
+func writeEntryLine(out io.Writer, e diff.Entry) {
+	switch {
+	case e.Status == diff.Ignored && e.Override == diff.OverrideIgnored:
+		fmt.Fprintf(out, "  %s/%s: override (ignored) (per-repo>all-repos.managed)\n", e.Kind, e.Name)
+	case e.Status == diff.Mismatch:
+		fmt.Fprintf(out, "  %s/%s: mismatch (yaml=%q live=%q)%s\n", e.Kind, e.Name, e.DesiredValue, e.LiveValue, overrideSuffix(e))
+	default:
+		fmt.Fprintf(out, "  %s/%s: %s%s\n", e.Kind, e.Name, e.Status, overrideSuffix(e))
+	}
+}
+
+func overrideSuffix(e diff.Entry) string {
+	if e.Override == diff.OverrideManaged {
+		return " override(per-repo>all-repos)"
+	}
+	return ""
 }
 
 // ApplyRepo writes managed values for a single repo. It never deletes and
