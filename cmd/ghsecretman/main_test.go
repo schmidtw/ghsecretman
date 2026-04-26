@@ -800,3 +800,78 @@ github.com:
 		t.Errorf("stdout missing FAILED line: %q", stdout.String())
 	}
 }
+
+func TestRun_AuditOrgWide_IncludesOrgScope(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          ORG_VAR:
+            value: x
+    per-repo:
+      acme:
+        managed:
+          vars:
+            REPO_VAR:
+              value: y
+`)
+	be := &fakeBackend{
+		orgRepos: []string{"acme"},
+		vars:     map[string]string{"REPO_VAR": "y"},
+		orgVars:  map[string]string{"ORG_VAR": "x"},
+	}
+	swapBackend(t, be, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "audit", "--config", cfgPath, "--org", "example"}, "dev", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d want 0; stderr=%q\nstdout=%q", code, stderr.String(), stdout.String())
+	}
+	for _, want := range []string{"scope: org", "repo: acme", "summary: ok=1"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout missing %q\n--\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestRun_ApplyOrgWide_WritesOrgScope_Selected(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfg(t, dir, `
+github.com:
+  example:
+    org:
+      managed:
+        vars:
+          ORG_VAR:
+            value: x
+            scope: selected
+            repos:
+              - acme
+    per-repo:
+      acme:
+        managed:
+          vars:
+            REPO_VAR:
+              value: y
+`)
+	be := &fakeBackend{
+		orgRepos: []string{"acme"},
+		repoIDs:  map[string]int64{"acme": 42},
+	}
+	swapBackend(t, be, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ghsecretman", "apply", "--config", cfgPath, "--org", "example"}, "dev", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d want 0; stderr=%q\nstdout=%q", code, stderr.String(), stdout.String())
+	}
+	if len(be.setOrgVars) != 1 || be.setOrgVars[0] != "ORG_VAR" {
+		t.Errorf("expected one ORG_VAR set; got %v", be.setOrgVars)
+	}
+	if len(be.setVars) != 1 {
+		t.Errorf("expected one repo var set; got %v", be.setVars)
+	}
+}
