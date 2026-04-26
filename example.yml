@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: 2026 Weston Schmidt <weston_schmidt@alumni.purdue.edu>
+# SPDX-License-Identifier: Apache-2.0
+---
+# Secrets by service/site
+github.com:
+  # Github org secrets apply to
+  example:
+    # org level variables and secrets to set/audit
+    org:
+      # These secrets are managed by this location & will always be made to
+      # match this value.
+      managed:
+        vars:
+          FOO:
+            value: bar
+            file: ../file
+            scope: all/private/selected   default is all
+            repos: [a, b, ... ]
+        secrets:
+          FOO:
+            value: bar
+            env: ENV_VAR_NAME
+            file: ../file
+        dependabot:
+          FOO:
+            value: bar
+      # These secrets are not managed by this location and will never be altered.
+      ignored:
+        vars:
+          - GOO
+        secrets:
+          - GOO
+        dependabot:
+          - GOO
+    # variables and secrets to set/audit on a per repo basis.  These will
+    # often be unique per repo.
+    per-repo:
+      repo-name:
+        # These secrets are managed by this location & will always be made to
+        # match this value.
+        managed:
+          vars:
+            FOO: bar
+          secrets:
+            FOO:
+              value: bar
+              env: ENV_VAR_NAME
+          dependabot:
+            FOO:
+              value: bar
+              env: ENV_VAR_NAME
+        # These secrets are not managed by this location and will never be altered.
+        ignored:
+          vars:
+            - GOO
+          secrets:
+            - GOO
+          dependabot:
+            - GOO
+    # variables and secrets to set/audit for all repos.  This generally will
+    # be replace by org level secrets, but this is still valuable to control.
+    all-repos:
+      # These secrets are managed by this location & will always be made to
+      # match this value.
+      # A side effect of this use case is this can make new values, but cannot
+      # remove the values because it doesn't know enough.  The per-repo rules
+      # will apply after a value is removed from managed.  Removing a value from
+      # this managed WILL NOT remove it from the repo's list, but the `per-repo`
+      # rules MAY REMOVE values depending on the `ignored` field.
+      managed:
+        vars:
+          RPM_GPG_PUBLIC_KEY:
+            value:
+            file: ../RPM-GPG-KEY-example
+        secrets:
+          PUSH_TAG_TOKEN:
+            value: ghp_secret
+            env: ENV_VAR_NAME
+            file: ./RPM-GPG-KEY-example.private
+        dependabot:
+          REPO_FETCHING_TOKEN:
+            value: ghp_secret
+            env: ENV_VAR_NAME
+            file: ./RPM-GPG-KEY-example.private
+      # When something is marked as ignored, it will be ignored for all repos,
+      # this allows a simple way to do this without needing to have a per repo
+      # entry everywhere.
+      ignored:
+        vars: []
+        secrets: []
+        dependabot: []
