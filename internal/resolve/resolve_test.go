@@ -90,20 +90,96 @@ func TestResolve_NoSource(t *testing.T) {
 }
 
 func TestResolve_Env(t *testing.T) {
-	t.Setenv("GHSM_TEST_VAR", "from-env")
-	got, err := Resolve(&config.Entry{Env: "GHSM_TEST_VAR"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	tests := []struct {
+		name    string
+		setKey  string
+		setVal  string
+		entry   *config.Entry
+		want    string
+		wantErr bool
+	}{
+		{
+			name:   "env set returns value",
+			setKey: "GHSM_TEST_SET",
+			setVal: "from-env",
+			entry:  &config.Entry{Name: "MY_ENTRY", Env: "GHSM_TEST_SET"},
+			want:   "from-env",
+		},
+		{
+			name:   "env set to empty string returns empty",
+			setKey: "GHSM_TEST_EMPTY",
+			setVal: "",
+			entry:  &config.Entry{Name: "MY_ENTRY", Env: "GHSM_TEST_EMPTY"},
+			want:   "",
+		},
+		{
+			name:    "env unset returns EnvError",
+			entry:   &config.Entry{Name: "MY_ENTRY", Env: "GHSM_TEST_DEFINITELY_UNSET"},
+			wantErr: true,
+		},
 	}
-	if got != "from-env" {
-		t.Fatalf("got %q want %q", got, "from-env")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.setKey != "" {
+				t.Setenv(tc.setKey, tc.setVal)
+			}
+			got, err := Resolve(tc.entry)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %q want %q", got, tc.want)
+			}
+		})
 	}
 }
 
-func TestResolve_EnvMissing(t *testing.T) {
-	_, err := Resolve(&config.Entry{Env: "GHSM_TEST_DEFINITELY_UNSET_VAR"})
+func TestResolve_EnvError_TypedAndContainsBothNames(t *testing.T) {
+	_, err := Resolve(&config.Entry{Name: "MY_SECRET", Env: "GHSM_TEST_DEFINITELY_UNSET"})
 	if err == nil {
 		t.Fatal("expected error for missing env var")
+	}
+	var ee *EnvError
+	if !errors.As(err, &ee) {
+		t.Fatalf("expected *EnvError, got %T: %v", err, err)
+	}
+	if ee.Name != "MY_SECRET" {
+		t.Errorf("EnvError.Name: got %q want %q", ee.Name, "MY_SECRET")
+	}
+	if ee.Var != "GHSM_TEST_DEFINITELY_UNSET" {
+		t.Errorf("EnvError.Var: got %q want %q", ee.Var, "GHSM_TEST_DEFINITELY_UNSET")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "MY_SECRET") || !strings.Contains(msg, "GHSM_TEST_DEFINITELY_UNSET") {
+		t.Errorf("error message %q must include both entry name and env var name", msg)
+	}
+}
+
+// TestResolve_EnvLazy proves that constructing an entry referencing an env
+// var does not by itself trigger a lookup — the lookup happens at the moment
+// Resolve is called. The entry is built up-front (as it would be at config
+// load time), then the env var is set, then Resolve is called and observes
+// the new value.
+func TestResolve_EnvLazy(t *testing.T) {
+	entry := &config.Entry{Name: "LAZY", Env: "GHSM_TEST_LAZY"}
+
+	if _, err := Resolve(entry); err == nil {
+		t.Fatal("expected error before env was set")
+	}
+
+	t.Setenv("GHSM_TEST_LAZY", "now-set")
+	got, err := Resolve(entry)
+	if err != nil {
+		t.Fatalf("unexpected error after env was set: %v", err)
+	}
+	if got != "now-set" {
+		t.Fatalf("got %q want %q", got, "now-set")
 	}
 }
 

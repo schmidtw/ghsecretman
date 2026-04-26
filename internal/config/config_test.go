@@ -24,12 +24,18 @@ github.com:
               value: bar
             BAZ:
               file: ../baz.txt
+            QUX:
+              env: QUX_VAR
           secrets:
             S1:
               value: shh
+            S2:
+              env: S2_VAR
           dependabot:
             D1:
               value: dep
+            D2:
+              env: D2_VAR
         ignored:
           vars:
             - SKIP_VAR
@@ -70,6 +76,21 @@ other.tool:
 	if !contains(repo.Ignored.Dependabot, "SKIP_DEP") {
 		t.Errorf("ignored dependabot missing SKIP_DEP")
 	}
+	if got := repo.Managed.Vars["QUX"].Env; got != "QUX_VAR" {
+		t.Errorf("QUX env: got %q want %q", got, "QUX_VAR")
+	}
+	if repo.Managed.Vars["QUX"].HasValue {
+		t.Errorf("QUX should not have an explicit value")
+	}
+	if got := repo.Managed.Secrets["S2"].Env; got != "S2_VAR" {
+		t.Errorf("S2 env: got %q", got)
+	}
+	if got := repo.Managed.Dependabot["D2"].Env; got != "D2_VAR" {
+		t.Errorf("D2 env: got %q", got)
+	}
+	if got := repo.Managed.Vars["QUX"].Name; got != "QUX" {
+		t.Errorf("QUX name: got %q want %q", got, "QUX")
+	}
 }
 
 func TestLoad_Invalid(t *testing.T) {
@@ -96,7 +117,7 @@ github.com:
 			errSubstr: "exactly one of",
 		},
 		{
-			name: "multi source value+env (env not yet supported but multi still rejected)",
+			name: "multi source value+env",
 			yml: `
 github.com:
   example:
@@ -106,6 +127,21 @@ github.com:
           secrets:
             FOO:
               value: bar
+              env: BAR_VAR
+`,
+			errSubstr: "exactly one of",
+		},
+		{
+			name: "multi source env+file",
+			yml: `
+github.com:
+  example:
+    per-repo:
+      acme:
+        managed:
+          secrets:
+            FOO:
+              env: BAR_VAR
               file: x
 `,
 			errSubstr: "exactly one of",
