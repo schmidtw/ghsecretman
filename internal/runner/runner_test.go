@@ -352,7 +352,7 @@ github.com:
 	}
 
 	var out bytes.Buffer
-	res, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &out, false)
+	res, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &out, false, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -402,7 +402,7 @@ github.com:
 	}
 	be := &fakeBackend{vars: map[string]string{"V": "ok"}}
 	var out bytes.Buffer
-	res, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &out, false)
+	res, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &out, false, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -436,7 +436,7 @@ github.com:
 	}
 	be := &fakeBackend{vars: map[string]string{"V": "from-file"}}
 	var out bytes.Buffer
-	res, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &out, false)
+	res, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &out, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,13 +448,13 @@ github.com:
 func TestAuditRepo_UnknownOrgRepo(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{Orgs: map[string]*config.Org{}}
-	_, err := AuditRepo(context.Background(), cfg, "missing", "acme", &fakeBackend{}, &bytes.Buffer{}, false)
+	_, err := AuditRepo(context.Background(), cfg, "missing", "acme", &fakeBackend{}, &bytes.Buffer{}, false, true)
 	if err == nil {
 		t.Fatal("expected error for unknown org")
 	}
 
 	cfg.Orgs["example"] = &config.Org{PerRepo: map[string]*config.Repo{}}
-	_, err = AuditRepo(context.Background(), cfg, "example", "missing-repo", &fakeBackend{}, &bytes.Buffer{}, false)
+	_, err = AuditRepo(context.Background(), cfg, "example", "missing-repo", &fakeBackend{}, &bytes.Buffer{}, false, true)
 	if err == nil {
 		t.Fatal("expected error for unknown repo")
 	}
@@ -468,7 +468,7 @@ func TestAuditRepo_BackendError(t *testing.T) {
 		},
 	}
 	be := &fakeBackend{err: errors.New("boom")}
-	_, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}, false)
+	_, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}, false, true)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -495,7 +495,7 @@ github.com:
 		t.Fatal(err)
 	}
 	be := &fakeBackend{vars: map[string]string{"V": "x"}}
-	_, err = AuditRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}, false)
+	_, err = AuditRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}, false, true)
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
@@ -539,7 +539,7 @@ github.com:
 	}
 	be := &fakeBackend{}
 	var out bytes.Buffer
-	res, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &out)
+	res, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &out, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -622,7 +622,7 @@ github.com:
 		t.Fatal(err)
 	}
 	be := &fakeBackend{}
-	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}); err != nil {
+	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}, true); err != nil {
 		t.Fatal(err)
 	}
 	if be.actionsKeyFetches != 0 || be.dependabotKeyFetches != 0 {
@@ -660,7 +660,7 @@ github.com:
 		setErr: map[string]error{"vars/V_BAD": errors.New("rate limit")},
 	}
 	var out bytes.Buffer
-	res, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &out)
+	res, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &out, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -703,7 +703,7 @@ github.com:
 		t.Fatal(err)
 	}
 	be := &fakeBackend{actionsKeyErr: errors.New("forbidden")}
-	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}); err == nil {
+	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}, true); err == nil {
 		t.Fatal("expected error when public key fetch fails")
 	}
 }
@@ -729,7 +729,7 @@ github.com:
 		t.Fatal(err)
 	}
 	be := &fakeBackend{dependabotKeyErr: errors.New("forbidden")}
-	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}); err == nil {
+	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}, true); err == nil {
 		t.Fatal("expected error when dependabot public key fetch fails")
 	}
 }
@@ -754,7 +754,7 @@ github.com:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", &fakeBackend{}, &bytes.Buffer{}); err == nil {
+	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", &fakeBackend{}, &bytes.Buffer{}, true); err == nil {
 		t.Fatal("expected resolve error")
 	}
 }
@@ -762,11 +762,11 @@ github.com:
 func TestApplyRepo_UnknownOrgRepo(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{Orgs: map[string]*config.Org{}}
-	if _, err := ApplyRepo(context.Background(), cfg, "missing", "acme", &fakeBackend{}, &bytes.Buffer{}); err == nil {
+	if _, err := ApplyRepo(context.Background(), cfg, "missing", "acme", &fakeBackend{}, &bytes.Buffer{}, true); err == nil {
 		t.Fatal("expected error for unknown org")
 	}
 	cfg.Orgs["example"] = &config.Org{PerRepo: map[string]*config.Repo{}}
-	if _, err := ApplyRepo(context.Background(), cfg, "example", "missing", &fakeBackend{}, &bytes.Buffer{}); err == nil {
+	if _, err := ApplyRepo(context.Background(), cfg, "example", "missing", &fakeBackend{}, &bytes.Buffer{}, true); err == nil {
 		t.Fatal("expected error for unknown repo")
 	}
 }
@@ -836,7 +836,7 @@ github.com:
 
 	be := &fakeBackend{}
 	var out bytes.Buffer
-	res, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &out)
+	res, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &out, true)
 	if err != nil {
 		t.Fatalf("targeting acme should not require env vars referenced only by another repo, got: %v", err)
 	}
@@ -868,7 +868,7 @@ github.com:
 		t.Fatal(err)
 	}
 
-	_, err = ApplyRepo(context.Background(), cfg, "example", "acme", &fakeBackend{}, &bytes.Buffer{})
+	_, err = ApplyRepo(context.Background(), cfg, "example", "acme", &fakeBackend{}, &bytes.Buffer{}, true)
 	if err == nil {
 		t.Fatal("expected error when a targeted entry's env var is unset")
 	}
@@ -903,7 +903,7 @@ github.com:
 
 	be := &fakeBackend{vars: map[string]string{"V": "live-side"}}
 	var out bytes.Buffer
-	res, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &out, false)
+	res, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &out, false, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -951,7 +951,7 @@ github.com:
 	}
 	be := &fakeBackend{}
 	var out bytes.Buffer
-	res, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &out)
+	res, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &out, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1013,7 +1013,7 @@ github.com:
 		dependabot: []string{"D_KEEP", "D_EXTRA"},
 	}
 	var out bytes.Buffer
-	res, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &out, EnforceOptions{})
+	res, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &out, EnforceOptions{Verbose: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1086,7 +1086,7 @@ github.com:
 		dependabot: []string{"D_LEAVE_ALONE"},
 	}
 	var out bytes.Buffer
-	if _, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &out, EnforceOptions{}); err != nil {
+	if _, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &out, EnforceOptions{Verbose: true}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	for _, n := range be.delVarCalls {
@@ -1149,7 +1149,7 @@ github.com:
 		secrets: []string{"S_EXTRA"},
 	}
 	var out bytes.Buffer
-	res, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &out, EnforceOptions{DryRun: true})
+	res, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &out, EnforceOptions{DryRun: true, Verbose: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1202,7 +1202,7 @@ github.com:
 		t.Fatal(err)
 	}
 	be := &fakeBackend{}
-	if _, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}, EnforceOptions{DryRun: true}); err != nil {
+	if _, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}, EnforceOptions{DryRun: true, Verbose: true}); err != nil {
 		t.Fatalf("dry-run should not require value resolution; got: %v", err)
 	}
 }
@@ -1229,7 +1229,7 @@ github.com:
 		delErr: map[string]error{"vars/V_BAD": errors.New("boom")},
 	}
 	var out bytes.Buffer
-	res, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &out, EnforceOptions{})
+	res, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &out, EnforceOptions{Verbose: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1251,11 +1251,11 @@ github.com:
 func TestEnforceRepo_UnknownOrgRepo(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{Orgs: map[string]*config.Org{}}
-	if _, err := EnforceRepo(context.Background(), cfg, "missing", "acme", &fakeBackend{}, &bytes.Buffer{}, EnforceOptions{}); err == nil {
+	if _, err := EnforceRepo(context.Background(), cfg, "missing", "acme", &fakeBackend{}, &bytes.Buffer{}, EnforceOptions{Verbose: true}); err == nil {
 		t.Fatal("expected error for unknown org")
 	}
 	cfg.Orgs["example"] = &config.Org{PerRepo: map[string]*config.Repo{}}
-	if _, err := EnforceRepo(context.Background(), cfg, "example", "missing", &fakeBackend{}, &bytes.Buffer{}, EnforceOptions{}); err == nil {
+	if _, err := EnforceRepo(context.Background(), cfg, "example", "missing", &fakeBackend{}, &bytes.Buffer{}, EnforceOptions{Verbose: true}); err == nil {
 		t.Fatal("expected error for unknown repo")
 	}
 }
@@ -1268,7 +1268,7 @@ func TestEnforceRepo_BackendListError(t *testing.T) {
 		},
 	}
 	be := &fakeBackend{err: errors.New("boom")}
-	if _, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}, EnforceOptions{}); err == nil {
+	if _, err := EnforceRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}, EnforceOptions{Verbose: true}); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -1293,7 +1293,7 @@ github.com:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := EnforceRepo(context.Background(), cfg, "example", "acme", &fakeBackend{}, &bytes.Buffer{}, EnforceOptions{}); err == nil {
+	if _, err := EnforceRepo(context.Background(), cfg, "example", "acme", &fakeBackend{}, &bytes.Buffer{}, EnforceOptions{Verbose: true}); err == nil {
 		t.Fatal("expected resolve error in live enforce mode")
 	}
 }
@@ -1322,7 +1322,7 @@ github.com:
 		vars:     map[string]string{"ALL_VAR": "ok"},
 	}
 	var out bytes.Buffer
-	res, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{})
+	res, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{Verbose: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1366,7 +1366,7 @@ github.com:
 		vars:     map[string]string{"V": "ok"},
 	}
 	var out bytes.Buffer
-	res, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{})
+	res, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{Verbose: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1403,7 +1403,7 @@ github.com:
 		err:      errors.New("boom"),
 	}
 	var out bytes.Buffer
-	res, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{})
+	res, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{Verbose: true})
 	if err != nil {
 		t.Fatalf("Audit should continue on per-repo error, not return one: %v", err)
 	}
@@ -1436,7 +1436,7 @@ github.com:
 		t.Fatal(err)
 	}
 	be := &fakeBackend{orgReposErr: errors.New("forbidden")}
-	if _, err := Audit(context.Background(), cfg, "example", be, &bytes.Buffer{}, false, OrgOptions{}); err == nil {
+	if _, err := Audit(context.Background(), cfg, "example", be, &bytes.Buffer{}, false, OrgOptions{Verbose: true}); err == nil {
 		t.Fatal("expected error when ListOrgRepos fails")
 	}
 }
@@ -1444,7 +1444,7 @@ github.com:
 func TestAudit_UnknownOrg(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{Orgs: map[string]*config.Org{}}
-	if _, err := Audit(context.Background(), cfg, "missing", &fakeBackend{}, &bytes.Buffer{}, false, OrgOptions{}); err == nil {
+	if _, err := Audit(context.Background(), cfg, "missing", &fakeBackend{}, &bytes.Buffer{}, false, OrgOptions{Verbose: true}); err == nil {
 		t.Fatal("expected error for unknown org")
 	}
 }
@@ -1476,7 +1476,7 @@ github.com:
 	}
 	be := &fakeBackend{orgRepos: []string{"acme", "beta"}}
 	var out bytes.Buffer
-	res, err := Apply(context.Background(), cfg, "example", be, &out, OrgOptions{})
+	res, err := Apply(context.Background(), cfg, "example", be, &out, OrgOptions{Verbose: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1501,7 +1501,7 @@ github.com:
 func TestApply_UnknownOrg(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{Orgs: map[string]*config.Org{}}
-	if _, err := Apply(context.Background(), cfg, "missing", &fakeBackend{}, &bytes.Buffer{}, OrgOptions{}); err == nil {
+	if _, err := Apply(context.Background(), cfg, "missing", &fakeBackend{}, &bytes.Buffer{}, OrgOptions{Verbose: true}); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -1512,7 +1512,7 @@ func TestApply_ListOrgReposError(t *testing.T) {
 		"example": {AllRepos: &config.Repo{}},
 	}}
 	be := &fakeBackend{orgReposErr: errors.New("boom")}
-	if _, err := Apply(context.Background(), cfg, "example", be, &bytes.Buffer{}, OrgOptions{}); err == nil {
+	if _, err := Apply(context.Background(), cfg, "example", be, &bytes.Buffer{}, OrgOptions{Verbose: true}); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -1541,7 +1541,7 @@ github.com:
 		vars:     map[string]string{"EXTRA": "x"},
 	}
 	var out bytes.Buffer
-	if _, err := Enforce(context.Background(), cfg, "example", be, &out, EnforceOptions{DryRun: true}); err != nil {
+	if _, err := Enforce(context.Background(), cfg, "example", be, &out, EnforceOptions{DryRun: true, Verbose: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(be.setVarCalls)+len(be.delVarCalls) != 0 {
@@ -1558,7 +1558,7 @@ github.com:
 func TestEnforce_UnknownOrg(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{Orgs: map[string]*config.Org{}}
-	if _, err := Enforce(context.Background(), cfg, "missing", &fakeBackend{}, &bytes.Buffer{}, EnforceOptions{}); err == nil {
+	if _, err := Enforce(context.Background(), cfg, "missing", &fakeBackend{}, &bytes.Buffer{}, EnforceOptions{Verbose: true}); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -1569,7 +1569,7 @@ func TestEnforce_ListOrgReposError(t *testing.T) {
 		"example": {AllRepos: &config.Repo{}},
 	}}
 	be := &fakeBackend{orgReposErr: errors.New("boom")}
-	if _, err := Enforce(context.Background(), cfg, "example", be, &bytes.Buffer{}, EnforceOptions{}); err == nil {
+	if _, err := Enforce(context.Background(), cfg, "example", be, &bytes.Buffer{}, EnforceOptions{Verbose: true}); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -1597,7 +1597,7 @@ github.com:
 		t.Fatal(err)
 	}
 	be := &fakeBackend{vars: map[string]string{"V": "shared"}}
-	res, err := AuditRepo(context.Background(), cfg, "example", "any-repo", be, &bytes.Buffer{}, false)
+	res, err := AuditRepo(context.Background(), cfg, "example", "any-repo", be, &bytes.Buffer{}, false, true)
 	if err != nil {
 		t.Fatalf("repo with no per-repo entry should still audit when all-repos exists: %v", err)
 	}
@@ -1634,7 +1634,7 @@ github.com:
 		t.Fatal(err)
 	}
 	be := &fakeBackend{}
-	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}); err != nil {
+	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}, true); err != nil {
 		t.Fatal(err)
 	}
 	if len(be.setVarCalls) != 1 || be.setVarCalls[0].value != "acme-only" {
@@ -1669,7 +1669,7 @@ github.com:
 		t.Fatal(err)
 	}
 	be := &fakeBackend{}
-	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}); err != nil {
+	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}, true); err != nil {
 		t.Fatal(err)
 	}
 	if len(be.setVarCalls) != 0 {
@@ -1705,7 +1705,7 @@ github.com:
 		t.Fatal(err)
 	}
 	be := &fakeBackend{}
-	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}); err != nil {
+	if _, err := ApplyRepo(context.Background(), cfg, "example", "acme", be, &bytes.Buffer{}, true); err != nil {
 		t.Fatal(err)
 	}
 	if len(be.setVarCalls) != 1 || be.setVarCalls[0].value != "acme-explicit" {
@@ -1734,7 +1734,7 @@ github.com:
 	}
 	be := &fakeBackend{vars: map[string]string{"IG_VAR": "x"}}
 	var out bytes.Buffer
-	res, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &out, true)
+	res, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &out, true, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1781,7 +1781,7 @@ github.com:
 	}
 	be := &fakeBackend{vars: map[string]string{"V_MATCH": "acme-match"}}
 	var out bytes.Buffer
-	if _, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &out, false); err != nil {
+	if _, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &out, false, true); err != nil {
 		t.Fatal(err)
 	}
 	s := out.String()
@@ -1829,7 +1829,7 @@ github.com:
 	// an all-repos.managed entry.
 	be := &fakeBackend{}
 	var quiet bytes.Buffer
-	if _, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &quiet, false); err != nil {
+	if _, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &quiet, false, true); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(quiet.String(), "V_SHIELD") {
@@ -1838,7 +1838,7 @@ github.com:
 
 	// With --show-ignored: an "override (ignored)" row that names both layers.
 	var loud bytes.Buffer
-	if _, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &loud, true); err != nil {
+	if _, err := AuditRepo(context.Background(), cfg, "example", "acme", be, &loud, true, true); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
@@ -1913,7 +1913,7 @@ github.com:
 
 	var out bytes.Buffer
 	limit := 4
-	if _, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{Concurrency: limit}); err != nil {
+	if _, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{Concurrency: limit, Verbose: true}); err != nil {
 		t.Fatal(err)
 	}
 	if got := int(be.maxInFlight.Load()); got > limit {
@@ -1959,7 +1959,7 @@ github.com:
 	}
 
 	var out bytes.Buffer
-	if _, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{Concurrency: 8}); err != nil {
+	if _, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{Concurrency: 8, Verbose: true}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2027,7 +2027,7 @@ github.com:
 		vars:     map[string]string{"V": "ok"},
 	}
 	var out bytes.Buffer
-	res, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{})
+	res, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{Verbose: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2110,7 +2110,7 @@ github.com:
 				vars:     tc.live,
 				err:      tc.listErr,
 			}
-			res, err := Audit(context.Background(), cfg, "example", be, &bytes.Buffer{}, false, OrgOptions{})
+			res, err := Audit(context.Background(), cfg, "example", be, &bytes.Buffer{}, false, OrgOptions{Verbose: true})
 			if err != nil {
 				t.Fatalf("Audit returned err: %v", err)
 			}
@@ -2155,7 +2155,7 @@ github.com:
 		setErr:   map[string]error{"vars/V": errors.New("rate limit")},
 	}
 	var out bytes.Buffer
-	res, err := Apply(context.Background(), cfg, "example", be, &out, OrgOptions{Concurrency: 3})
+	res, err := Apply(context.Background(), cfg, "example", be, &out, OrgOptions{Concurrency: 3, Verbose: true})
 	if err != nil {
 		t.Fatalf("apply should not return an error on per-entry failures: %v", err)
 	}
@@ -2184,7 +2184,7 @@ github.com:
 `)
 	be := &fakeBackend{}
 	var out bytes.Buffer
-	res, err := AuditOrgScope(context.Background(), cfg, "example", be, &out, false)
+	res, err := AuditOrgScope(context.Background(), cfg, "example", be, &out, false, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2219,7 +2219,7 @@ github.com:
 		orgDependabot: []string{},
 	}
 	var out bytes.Buffer
-	res, err := AuditOrgScope(context.Background(), cfg, "example", be, &out, false)
+	res, err := AuditOrgScope(context.Background(), cfg, "example", be, &out, false, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2245,7 +2245,7 @@ func TestAuditOrgScope_UnknownOrg(t *testing.T) {
 	t.Parallel()
 	cfg := mustLoadCfg(t, `github.com: {}`)
 	be := &fakeBackend{}
-	if _, err := AuditOrgScope(context.Background(), cfg, "ghost", be, &bytes.Buffer{}, false); err == nil {
+	if _, err := AuditOrgScope(context.Background(), cfg, "ghost", be, &bytes.Buffer{}, false, true); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -2262,7 +2262,7 @@ github.com:
             value: x
 `)
 	be := &fakeBackend{err: errors.New("boom")}
-	if _, err := AuditOrgScope(context.Background(), cfg, "example", be, &bytes.Buffer{}, false); err == nil {
+	if _, err := AuditOrgScope(context.Background(), cfg, "example", be, &bytes.Buffer{}, false, true); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -2295,7 +2295,7 @@ github.com:
 		repoIDs: map[string]int64{"alpha": 1, "beta": 2},
 	}
 	var out bytes.Buffer
-	res, err := ApplyOrgScope(context.Background(), cfg, "example", be, &out)
+	res, err := ApplyOrgScope(context.Background(), cfg, "example", be, &out, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2349,7 +2349,7 @@ github.com:
             value: x
 `)
 	be := &fakeBackend{}
-	if _, err := ApplyOrgScope(context.Background(), cfg, "example", be, &bytes.Buffer{}); err != nil {
+	if _, err := ApplyOrgScope(context.Background(), cfg, "example", be, &bytes.Buffer{}, true); err != nil {
 		t.Fatal(err)
 	}
 	if be.orgActionsKeyFetches != 0 || be.orgDependabotKeyFetches != 0 {
@@ -2373,7 +2373,7 @@ github.com:
               - missing
 `)
 	be := &fakeBackend{repoIDs: map[string]int64{}}
-	if _, err := ApplyOrgScope(context.Background(), cfg, "example", be, &bytes.Buffer{}); err == nil {
+	if _, err := ApplyOrgScope(context.Background(), cfg, "example", be, &bytes.Buffer{}, true); err == nil {
 		t.Fatal("expected error from repo id lookup")
 	}
 }
@@ -2395,7 +2395,7 @@ github.com:
 		setErr: map[string]error{"org/vars/V_BAD": errors.New("boom")},
 	}
 	var out bytes.Buffer
-	res, err := ApplyOrgScope(context.Background(), cfg, "example", be, &out)
+	res, err := ApplyOrgScope(context.Background(), cfg, "example", be, &out, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2412,7 +2412,7 @@ func TestApplyOrgScope_NoOrgBlockIsNoop(t *testing.T) {
 	cfg := mustLoadCfg(t, `github.com: {example: {}}`)
 	be := &fakeBackend{}
 	var out bytes.Buffer
-	if _, err := ApplyOrgScope(context.Background(), cfg, "example", be, &out); err != nil {
+	if _, err := ApplyOrgScope(context.Background(), cfg, "example", be, &out, true); err != nil {
 		t.Fatal(err)
 	}
 	if out.Len() != 0 {
@@ -2423,7 +2423,7 @@ func TestApplyOrgScope_NoOrgBlockIsNoop(t *testing.T) {
 func TestApplyOrgScope_UnknownOrg(t *testing.T) {
 	t.Parallel()
 	cfg := mustLoadCfg(t, `github.com: {}`)
-	if _, err := ApplyOrgScope(context.Background(), cfg, "ghost", &fakeBackend{}, &bytes.Buffer{}); err == nil {
+	if _, err := ApplyOrgScope(context.Background(), cfg, "ghost", &fakeBackend{}, &bytes.Buffer{}, true); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -2446,7 +2446,7 @@ github.com:
 		orgVars: map[string]string{"KEEP": "k", "EXTRA": "drop", "LEAVE": "alone"},
 	}
 	var out bytes.Buffer
-	res, err := EnforceOrgScope(context.Background(), cfg, "example", be, &out, EnforceOptions{})
+	res, err := EnforceOrgScope(context.Background(), cfg, "example", be, &out, EnforceOptions{Verbose: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2477,7 +2477,7 @@ github.com:
 `)
 	be := &fakeBackend{orgVars: map[string]string{"EXTRA": "y"}}
 	var out bytes.Buffer
-	if _, err := EnforceOrgScope(context.Background(), cfg, "example", be, &out, EnforceOptions{DryRun: true}); err != nil {
+	if _, err := EnforceOrgScope(context.Background(), cfg, "example", be, &out, EnforceOptions{DryRun: true, Verbose: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(be.setOrgVarCalls) != 0 || len(be.delOrgVarCalls) != 0 {
@@ -2494,7 +2494,7 @@ func TestEnforceOrgScope_NoOrgBlock(t *testing.T) {
 	cfg := mustLoadCfg(t, `github.com: {example: {}}`)
 	be := &fakeBackend{}
 	var out bytes.Buffer
-	if _, err := EnforceOrgScope(context.Background(), cfg, "example", be, &out, EnforceOptions{}); err != nil {
+	if _, err := EnforceOrgScope(context.Background(), cfg, "example", be, &out, EnforceOptions{Verbose: true}); err != nil {
 		t.Fatal(err)
 	}
 	if out.Len() != 0 {
@@ -2505,7 +2505,7 @@ func TestEnforceOrgScope_NoOrgBlock(t *testing.T) {
 func TestEnforceOrgScope_UnknownOrg(t *testing.T) {
 	t.Parallel()
 	cfg := mustLoadCfg(t, `github.com: {}`)
-	if _, err := EnforceOrgScope(context.Background(), cfg, "ghost", &fakeBackend{}, &bytes.Buffer{}, EnforceOptions{}); err == nil {
+	if _, err := EnforceOrgScope(context.Background(), cfg, "ghost", &fakeBackend{}, &bytes.Buffer{}, EnforceOptions{Verbose: true}); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -2533,7 +2533,7 @@ github.com:
 		orgVars:  map[string]string{"ORG_VAR": "x"},
 	}
 	var out bytes.Buffer
-	res, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{Concurrency: 1})
+	res, err := Audit(context.Background(), cfg, "example", be, &out, false, OrgOptions{Concurrency: 1, Verbose: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2568,7 +2568,7 @@ github.com:
 `)
 	be := &fakeBackend{orgRepos: []string{"acme"}}
 	var out bytes.Buffer
-	if _, err := Apply(context.Background(), cfg, "example", be, &out, OrgOptions{Concurrency: 1}); err != nil {
+	if _, err := Apply(context.Background(), cfg, "example", be, &out, OrgOptions{Concurrency: 1, Verbose: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(be.setOrgVarCalls) != 1 || be.setOrgVarCalls[0].name != "ORG_VAR" {

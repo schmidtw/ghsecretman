@@ -87,6 +87,10 @@ commands:
 authentication:
   Reads GITHUB_TOKEN (preferred) or GH_TOKEN from the environment.
 
+output:
+  audit/apply/enforce report only changes by default. Pass -v/--verbose
+  to also see per-repo headers and unchanged ('match') entries.
+
 Run 'ghsecretman <command> -h' for command-specific flags.
 See 'ghsecretman example' for the full schema with annotations.
 `)
@@ -137,6 +141,9 @@ func runEnforce(args []string, stdout, stderr io.Writer) int {
 	repo := fs.String("repo", "", "single repo to enforce; omit to iterate every repo in the org")
 	dryRun := fs.Bool("dry-run", false, "print intended writes and deletes; make no API write calls")
 	concurrency := fs.Int("concurrency", runner.DefaultConcurrency, "max repos processed in parallel for org-wide runs")
+	var verbose bool
+	fs.BoolVar(&verbose, "verbose", false, "emit per-repo headers and `match` entries even when nothing changed")
+	fs.BoolVar(&verbose, "v", false, "verbose (shorthand)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -157,7 +164,7 @@ func runEnforce(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	opts := runner.EnforceOptions{DryRun: *dryRun, Concurrency: *concurrency}
+	opts := runner.EnforceOptions{DryRun: *dryRun, Concurrency: *concurrency, Verbose: verbose}
 
 	if *repo != "" {
 		return runEnforceRepo(cfg, *org, *repo, backend, opts, stdout, stderr)
@@ -197,6 +204,9 @@ func runAudit(args []string, stdout, stderr io.Writer) int {
 	repo := fs.String("repo", "", "single repo to audit; omit to iterate every repo in the org")
 	showIgnored := fs.Bool("show-ignored", false, "include ignored entries in output")
 	concurrency := fs.Int("concurrency", runner.DefaultConcurrency, "max repos processed in parallel for org-wide runs")
+	var verbose bool
+	fs.BoolVar(&verbose, "verbose", false, "emit per-repo headers and `match` entries even when nothing differs")
+	fs.BoolVar(&verbose, "v", false, "verbose (shorthand)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -218,7 +228,7 @@ func runAudit(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if *repo != "" {
-		res, err := runner.AuditRepo(context.Background(), cfg, *org, *repo, backend, stdout, *showIgnored)
+		res, err := runner.AuditRepo(context.Background(), cfg, *org, *repo, backend, stdout, *showIgnored, verbose)
 		if err != nil {
 			fmt.Fprintf(stderr, "audit: %v\n", err)
 			return 1
@@ -229,7 +239,7 @@ func runAudit(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	res, err := runner.Audit(context.Background(), cfg, *org, backend, stdout, *showIgnored, runner.OrgOptions{Concurrency: *concurrency})
+	res, err := runner.Audit(context.Background(), cfg, *org, backend, stdout, *showIgnored, runner.OrgOptions{Concurrency: *concurrency, Verbose: verbose})
 	if err != nil {
 		fmt.Fprintf(stderr, "audit: %v\n", err)
 		return 1
@@ -247,6 +257,9 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	org := fs.String("org", "", "GitHub organization name")
 	repo := fs.String("repo", "", "single repo to apply; omit to iterate every repo in the org")
 	concurrency := fs.Int("concurrency", runner.DefaultConcurrency, "max repos processed in parallel for org-wide runs")
+	var verbose bool
+	fs.BoolVar(&verbose, "verbose", false, "emit per-repo headers even for repos with nothing to apply")
+	fs.BoolVar(&verbose, "v", false, "verbose (shorthand)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -268,7 +281,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if *repo != "" {
-		res, err := runner.ApplyRepo(context.Background(), cfg, *org, *repo, backend, stdout)
+		res, err := runner.ApplyRepo(context.Background(), cfg, *org, *repo, backend, stdout, verbose)
 		if err != nil {
 			fmt.Fprintf(stderr, "apply: %v\n", err)
 			return 1
@@ -279,7 +292,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	res, err := runner.Apply(context.Background(), cfg, *org, backend, stdout, runner.OrgOptions{Concurrency: *concurrency})
+	res, err := runner.Apply(context.Background(), cfg, *org, backend, stdout, runner.OrgOptions{Concurrency: *concurrency, Verbose: verbose})
 	if err != nil {
 		fmt.Fprintf(stderr, "apply: %v\n", err)
 		return 1

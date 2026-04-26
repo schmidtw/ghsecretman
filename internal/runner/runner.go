@@ -32,6 +32,11 @@ type OrgOptions struct {
 	// Concurrency bounds the number of repos processed in parallel. Zero
 	// or negative selects DefaultConcurrency.
 	Concurrency int
+
+	// Verbose, when true, emits per-repo headers and (in audit) match
+	// entries for every iterated repo. When false (default), repos with
+	// no events are silent and audit suppresses match entries.
+	Verbose bool
 }
 
 func resolveConcurrency(n int) int {
@@ -52,10 +57,12 @@ type Result struct {
 
 // AuditRepo runs an audit against a single repo and writes a labeled
 // stanza to out. showIgnored controls whether ignored entries appear.
+// verbose=false suppresses match entries and skips the stanza entirely
+// when no non-match drift remains.
 //
 // The repo is resolved via the per-repo > all-repos cascade. A repo with
 // no per-repo block is still valid as long as the org defines all-repos.
-func AuditRepo(ctx context.Context, cfg *config.Config, org, repo string, backend gh.Backend, out io.Writer, showIgnored bool) (Result, error) {
+func AuditRepo(ctx context.Context, cfg *config.Config, org, repo string, backend gh.Backend, out io.Writer, showIgnored, verbose bool) (Result, error) {
 	o, perRepo, err := lookupTarget(cfg, org, repo)
 	if err != nil {
 		return Result{}, err
@@ -75,7 +82,7 @@ func AuditRepo(ctx context.Context, cfg *config.Config, org, repo string, backen
 
 	effIgnored := plan.EffectiveIgnored(o.AllRepos, perRepo)
 	entries := diff.Compute(repo, intents, desiredVars, live, effIgnored)
-	writeStanza(out, org, repo, entries, showIgnored)
+	writeStanza(out, org, repo, entries, showIgnored, verbose)
 
 	return Result{Drift: diff.HasDrift(entries)}, nil
 }
@@ -123,12 +130,27 @@ func fetchLive(ctx context.Context, backend gh.Backend, org, repo string) (diff.
 	return diff.Live{Vars: vars, Secrets: secrets, Dependabot: dependabot}, nil
 }
 
-func writeStanza(out io.Writer, org, repo string, entries []diff.Entry, showIgnored bool) {
-	fmt.Fprintf(out, "org: %s\nrepo: %s\n", org, repo)
+// writeStanza writes the per-repo audit stanza. When verbose is false,
+// `match` entries are suppressed and the entire stanza (including the
+// per-repo header) is skipped if no entries remain. When verbose is true,
+// every non-ignored entry is written and the header is always printed.
+// Ignored entries are honored by showIgnored independently.
+func writeStanza(out io.Writer, org, repo string, entries []diff.Entry, showIgnored, verbose bool) {
+	visible := make([]diff.Entry, 0, len(entries))
 	for _, e := range entries {
 		if e.Status == diff.Ignored && !showIgnored {
 			continue
 		}
+		if !verbose && e.Status == diff.Match {
+			continue
+		}
+		visible = append(visible, e)
+	}
+	if len(visible) == 0 && !verbose {
+		return
+	}
+	fmt.Fprintf(out, "org: %s\nrepo: %s\n", org, repo)
+	for _, e := range visible {
 		writeEntryLine(out, e)
 	}
 }
@@ -167,10 +189,14 @@ func overrideSuffix(e diff.Entry) string {
 // "ok" or "FAILED: <err>" line is written for each managed entry; a final
 // summary line is written if any entry failed.
 //
+// When verbose is false the per-repo header is suppressed for repos with
+// nothing to apply (no managed entries). When verbose is true the header
+// is always written.
+//
 // The repo's Actions and Dependabot public keys are fetched at most once
 // per call (only when the corresponding section has at least one entry)
 // and reused across all set calls.
-func ApplyRepo(ctx context.Context, cfg *config.Config, org, repo string, backend gh.Backend, out io.Writer) (Result, error) {
+func ApplyRepo(ctx context.Context, cfg *config.Config, org, repo string, backend gh.Backend, out io.Writer, verbose bool) (Result, error) {
 	o, perRepo, err := lookupTarget(cfg, org, repo)
 	if err != nil {
 		return Result{}, err
@@ -187,7 +213,7 @@ func ApplyRepo(ctx context.Context, cfg *config.Config, org, repo string, backen
 		return Result{}, err
 	}
 
-	fmt.Fprintf(out, "org: %s\nrepo: %s\n", org, repo)
+	var body bytes.Buffer
 	res := Result{}
 	for _, in := range intents {
 		if in.Action != plan.ActionManaged {
@@ -196,10 +222,14 @@ func ApplyRepo(ctx context.Context, cfg *config.Config, org, repo string, backen
 		err := applyOne(ctx, backend, org, repo, in, resolved[entryKey(in)], actionsKey, depKey)
 		if err != nil {
 			res.Failed++
-			fmt.Fprintf(out, "  %s/%s: FAILED: %v\n", in.Kind, in.Name, err)
+			fmt.Fprintf(&body, "  %s/%s: FAILED: %v\n", in.Kind, in.Name, err)
 			continue
 		}
-		fmt.Fprintf(out, "  %s/%s: ok\n", in.Kind, in.Name)
+		fmt.Fprintf(&body, "  %s/%s: ok\n", in.Kind, in.Name)
+	}
+	if body.Len() > 0 || verbose {
+		fmt.Fprintf(out, "org: %s\nrepo: %s\n", org, repo)
+		_, _ = out.Write(body.Bytes())
 	}
 	if res.Failed > 0 {
 		fmt.Fprintf(out, "summary: %d failed\n", res.Failed)
@@ -274,12 +304,19 @@ type EnforceOptions struct {
 	// Concurrency bounds org-wide enforce iteration the same way
 	// OrgOptions.Concurrency does for Audit/Apply.
 	Concurrency int
+
+	// Verbose, when true, always emits the per-repo header even if the
+	// repo had no managed entries to set and no extras to delete. When
+	// false (default), the header is suppressed for repos with no events.
+	Verbose bool
 }
 
 // EnforceRepo applies managed values and then deletes any "extra" entries
 // — entries present on the repo but not listed in either the managed or
 // ignored block. With DryRun=true, it prints intended set/delete lines
-// without calling any write API.
+// without calling any write API. When opts.Verbose is false the per-repo
+// header is suppressed for repos with no events (no managed entries and
+// no extras).
 func EnforceRepo(ctx context.Context, cfg *config.Config, org, repo string, backend gh.Backend, out io.Writer, opts EnforceOptions) (Result, error) {
 	o, perRepo, err := lookupTarget(cfg, org, repo)
 	if err != nil {
@@ -305,10 +342,14 @@ func EnforceRepo(ctx context.Context, cfg *config.Config, org, repo string, back
 		return Result{}, err
 	}
 
-	fmt.Fprintf(out, "org: %s\nrepo: %s\n", org, repo)
+	var body bytes.Buffer
 	res := Result{}
-	res.Failed += runApplyPhase(ctx, backend, org, repo, intents, resolved, actionsKey, depKey, out, opts.DryRun)
-	res.Failed += runDeletePhase(ctx, backend, org, repo, entries, out, opts.DryRun)
+	res.Failed += runApplyPhase(ctx, backend, org, repo, intents, resolved, actionsKey, depKey, &body, opts.DryRun)
+	res.Failed += runDeletePhase(ctx, backend, org, repo, entries, &body, opts.DryRun)
+	if body.Len() > 0 || opts.Verbose {
+		fmt.Fprintf(out, "org: %s\nrepo: %s\n", org, repo)
+		_, _ = out.Write(body.Bytes())
+	}
 	if res.Failed > 0 {
 		fmt.Fprintf(out, "summary: %d failed\n", res.Failed)
 	}
@@ -495,7 +536,7 @@ func Audit(ctx context.Context, cfg *config.Config, org string, backend gh.Backe
 	}
 	res := OrgResult{}
 	if o.OrgScope != nil {
-		orgRes, err := AuditOrgScope(ctx, cfg, org, backend, out, showIgnored)
+		orgRes, err := AuditOrgScope(ctx, cfg, org, backend, out, showIgnored, opts.Verbose)
 		if err != nil {
 			fmt.Fprintf(out, "org: %s\nscope: org\n  ERROR: %v\n", org, err)
 			res.FailedRepos++
@@ -509,7 +550,7 @@ func Audit(ctx context.Context, cfg *config.Config, org string, backend gh.Backe
 	}
 	r := runOrg(ctx, repos, opts.Concurrency, out, func(repo string) repoWork {
 		return func(ctx context.Context, buf *bytes.Buffer) (Result, error) {
-			return AuditRepo(ctx, cfg, org, repo, backend, buf, showIgnored)
+			return AuditRepo(ctx, cfg, org, repo, backend, buf, showIgnored, opts.Verbose)
 		}
 	})
 	mergeOrgResult(&res, r, skipped)
@@ -537,7 +578,7 @@ func Apply(ctx context.Context, cfg *config.Config, org string, backend gh.Backe
 	}
 	res := OrgResult{}
 	if o.OrgScope != nil {
-		orgRes, err := ApplyOrgScope(ctx, cfg, org, backend, out)
+		orgRes, err := ApplyOrgScope(ctx, cfg, org, backend, out, opts.Verbose)
 		if err != nil {
 			fmt.Fprintf(out, "org: %s\nscope: org\n  ERROR: %v\n", org, err)
 			res.FailedRepos++
@@ -551,7 +592,7 @@ func Apply(ctx context.Context, cfg *config.Config, org string, backend gh.Backe
 	}
 	r := runOrg(ctx, repos, opts.Concurrency, out, func(repo string) repoWork {
 		return func(ctx context.Context, buf *bytes.Buffer) (Result, error) {
-			return ApplyRepo(ctx, cfg, org, repo, backend, buf)
+			return ApplyRepo(ctx, cfg, org, repo, backend, buf, opts.Verbose)
 		}
 	})
 	mergeOrgResult(&res, r, skipped)
@@ -595,7 +636,7 @@ func Enforce(ctx context.Context, cfg *config.Config, org string, backend gh.Bac
 // secrets defined under the org's `org:` block. It writes a single labeled
 // stanza to out. If the config has no `org:` block for orgName, the call is
 // a no-op (zero-value Result, no stanza, no error).
-func AuditOrgScope(ctx context.Context, cfg *config.Config, orgName string, backend gh.Backend, out io.Writer, showIgnored bool) (Result, error) {
+func AuditOrgScope(ctx context.Context, cfg *config.Config, orgName string, backend gh.Backend, out io.Writer, showIgnored, verbose bool) (Result, error) {
 	o, ok := cfg.Org(orgName)
 	if !ok {
 		return Result{}, fmt.Errorf("org %q not found in config", orgName)
@@ -614,7 +655,7 @@ func AuditOrgScope(ctx context.Context, cfg *config.Config, orgName string, back
 	}
 	effIgnored := plan.EffectiveOrgIgnored(o.OrgScope)
 	entries := diff.Compute("", intents, desiredVars, live, effIgnored)
-	writeOrgStanza(out, orgName, entries, showIgnored)
+	writeOrgStanza(out, orgName, entries, showIgnored, verbose)
 	return Result{Drift: diff.HasDrift(entries)}, nil
 }
 
@@ -634,12 +675,22 @@ func fetchOrgLive(ctx context.Context, backend gh.Backend, org string) (diff.Liv
 	return diff.Live{Vars: vars, Secrets: secrets, Dependabot: dependabot}, nil
 }
 
-func writeOrgStanza(out io.Writer, orgName string, entries []diff.Entry, showIgnored bool) {
-	fmt.Fprintf(out, "org: %s\nscope: org\n", orgName)
+func writeOrgStanza(out io.Writer, orgName string, entries []diff.Entry, showIgnored, verbose bool) {
+	visible := make([]diff.Entry, 0, len(entries))
 	for _, e := range entries {
 		if e.Status == diff.Ignored && !showIgnored {
 			continue
 		}
+		if !verbose && e.Status == diff.Match {
+			continue
+		}
+		visible = append(visible, e)
+	}
+	if len(visible) == 0 && !verbose {
+		return
+	}
+	fmt.Fprintf(out, "org: %s\nscope: org\n", orgName)
+	for _, e := range visible {
 		switch e.Status {
 		case diff.Mismatch:
 			fmt.Fprintf(out, "  %s/%s: mismatch (yaml=%q live=%q)\n", e.Kind, e.Name, e.DesiredValue, e.LiveValue)
@@ -651,8 +702,9 @@ func writeOrgStanza(out io.Writer, orgName string, entries []diff.Entry, showIgn
 
 // ApplyOrgScope writes org-level managed entries. It never deletes and never
 // touches anything outside the org's `org.managed` block. Returns Result with
-// per-entry write failures counted in Failed.
-func ApplyOrgScope(ctx context.Context, cfg *config.Config, orgName string, backend gh.Backend, out io.Writer) (Result, error) {
+// per-entry write failures counted in Failed. When verbose is false the
+// org-scope header is suppressed if there are no managed entries to write.
+func ApplyOrgScope(ctx context.Context, cfg *config.Config, orgName string, backend gh.Backend, out io.Writer, verbose bool) (Result, error) {
 	o, ok := cfg.Org(orgName)
 	if !ok {
 		return Result{}, fmt.Errorf("org %q not found in config", orgName)
@@ -673,7 +725,7 @@ func ApplyOrgScope(ctx context.Context, cfg *config.Config, orgName string, back
 	if err != nil {
 		return Result{}, err
 	}
-	fmt.Fprintf(out, "org: %s\nscope: org\n", orgName)
+	var body bytes.Buffer
 	res := Result{}
 	for _, in := range intents {
 		if in.Action != plan.ActionManaged {
@@ -682,10 +734,14 @@ func ApplyOrgScope(ctx context.Context, cfg *config.Config, orgName string, back
 		err := applyOrgOne(ctx, backend, orgName, in, resolved[entryKey(in)], idsByIntent[entryKey(in)], actionsKey, depKey)
 		if err != nil {
 			res.Failed++
-			fmt.Fprintf(out, "  %s/%s: FAILED: %v\n", in.Kind, in.Name, err)
+			fmt.Fprintf(&body, "  %s/%s: FAILED: %v\n", in.Kind, in.Name, err)
 			continue
 		}
-		fmt.Fprintf(out, "  %s/%s: ok\n", in.Kind, in.Name)
+		fmt.Fprintf(&body, "  %s/%s: ok\n", in.Kind, in.Name)
+	}
+	if body.Len() > 0 || verbose {
+		fmt.Fprintf(out, "org: %s\nscope: org\n", orgName)
+		_, _ = out.Write(body.Bytes())
 	}
 	if res.Failed > 0 {
 		fmt.Fprintf(out, "summary: %d failed\n", res.Failed)
@@ -800,10 +856,14 @@ func EnforceOrgScope(ctx context.Context, cfg *config.Config, orgName string, ba
 		}
 	}
 
-	fmt.Fprintf(out, "org: %s\nscope: org\n", orgName)
+	var body bytes.Buffer
 	res := Result{}
-	res.Failed += runOrgApplyPhase(ctx, backend, orgName, intents, resolved, idsByIntent, actionsKey, depKey, out, opts.DryRun)
-	res.Failed += runOrgDeletePhase(ctx, backend, orgName, entries, out, opts.DryRun)
+	res.Failed += runOrgApplyPhase(ctx, backend, orgName, intents, resolved, idsByIntent, actionsKey, depKey, &body, opts.DryRun)
+	res.Failed += runOrgDeletePhase(ctx, backend, orgName, entries, &body, opts.DryRun)
+	if body.Len() > 0 || opts.Verbose {
+		fmt.Fprintf(out, "org: %s\nscope: org\n", orgName)
+		_, _ = out.Write(body.Bytes())
+	}
 	if res.Failed > 0 {
 		fmt.Fprintf(out, "summary: %d failed\n", res.Failed)
 	}
