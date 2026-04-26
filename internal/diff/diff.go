@@ -49,10 +49,13 @@ type Entry struct {
 // desiredVars maps variable name → resolved desired value. Pass nil if no
 // vars are intended.
 func Compute(repo string, intents []plan.Intent, desiredVars map[string]string, live Live, ignored config.Ignored) []Entry {
-	out := make([]Entry, 0)
-	out = append(out, computeVars(repo, intents, desiredVars, live, ignored)...)
-	out = append(out, computeNames(repo, plan.KindSecret, intents, live.Secrets, ignored.Secrets)...)
-	out = append(out, computeNames(repo, plan.KindDependabot, intents, live.Dependabot, ignored.Dependabot)...)
+	vars := computeVars(repo, intents, desiredVars, live, ignored)
+	secrets := computeNames(repo, plan.KindSecret, intents, live.Secrets, ignored.Secrets)
+	deps := computeNames(repo, plan.KindDependabot, intents, live.Dependabot, ignored.Dependabot)
+	out := make([]Entry, 0, len(vars)+len(secrets)+len(deps))
+	out = append(out, vars...)
+	out = append(out, secrets...)
+	out = append(out, deps...)
 	return out
 }
 

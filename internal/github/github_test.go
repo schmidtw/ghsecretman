@@ -41,7 +41,7 @@ func TestClient_ListRepoVariables(t *testing.T) {
 func TestClient_ListRepoSecrets(t *testing.T) {
 	t.Parallel()
 	srv, c := newTestClient(t, map[string]string{
-		"/repos/example/acme/actions/secrets": `{"total_count":2,"secrets":[{"name":"S1"},{"name":"S2"}]}`,
+		"/repos/example/acme/actions/secrets": `{"total_count":2,"secrets":[{"name":"S1"},{"name":"S2"}]}`, // #nosec G101 -- fixture, no credentials
 	})
 	defer srv.Close()
 
@@ -59,7 +59,7 @@ func TestClient_ListRepoSecrets(t *testing.T) {
 func TestClient_ListRepoDependabotSecrets(t *testing.T) {
 	t.Parallel()
 	srv, c := newTestClient(t, map[string]string{
-		"/repos/example/acme/dependabot/secrets": `{"total_count":1,"secrets":[{"name":"D1"}]}`,
+		"/repos/example/acme/dependabot/secrets": `{"total_count":1,"secrets":[{"name":"D1"}]}`, // #nosec G101 -- fixture, no credentials
 	})
 	defer srv.Close()
 
