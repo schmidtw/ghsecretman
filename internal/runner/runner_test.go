@@ -57,9 +57,9 @@ type fakeBackend struct {
 	orgSecrets    []string
 	orgDependabot []string
 
-	orgActionsKeyErr     error
-	orgDependabotKeyErr  error
-	orgActionsKeyFetches int
+	orgActionsKeyErr        error
+	orgDependabotKeyErr     error
+	orgActionsKeyFetches    int
 	orgDependabotKeyFetches int
 
 	setOrgVarCalls []setOrgVarCall

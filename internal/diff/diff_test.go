@@ -152,11 +152,11 @@ func TestCompute_OverrideManaged_AttachesToManagedEntries(t *testing.T) {
 		statusOf[key] = e.Status
 	}
 	wantOverride := map[string]Override{
-		"vars/MATCH_OVR":       OverrideManaged,
-		"vars/MISS_OVR":        OverrideManaged,
-		"secrets/SEC_OVR":      OverrideManaged,
-		"dependabot/DEP_OVR":   OverrideManaged,
-		"vars/PLAIN":           OverrideNone,
+		"vars/MATCH_OVR":     OverrideManaged,
+		"vars/MISS_OVR":      OverrideManaged,
+		"secrets/SEC_OVR":    OverrideManaged,
+		"dependabot/DEP_OVR": OverrideManaged,
+		"vars/PLAIN":         OverrideNone,
 	}
 	for k, want := range wantOverride {
 		if overrideOf[k] != want {
