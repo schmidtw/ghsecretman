@@ -5,7 +5,13 @@
 github.com:
   # Github org secrets apply to
   example:
-    # org level variables and secrets to set/audit
+    # org level variables and secrets to set/audit.
+    #
+    # NOTE: the org: block is only valid for real GitHub organizations.
+    # GitHub has no org-level Actions/variable/Dependabot API for personal
+    # (user) accounts, so for a user account this block is reported and
+    # skipped. Use all-repos / per-repo for user accounts instead; repo
+    # fan-out works the same as it does for an organization.
     org:
       # These secrets are managed by this location & will always be made to
       # match this value.

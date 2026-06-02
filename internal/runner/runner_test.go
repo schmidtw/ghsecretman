@@ -20,8 +20,16 @@ import (
 )
 
 type fakeBackend struct {
+	// ownerType defaults to the zero value gh.OwnerOrg, so existing tests
+	// continue to exercise the org repo-listing path unchanged.
+	ownerType    gh.OwnerType
+	ownerTypeErr error
+
 	orgRepos    []string
 	orgReposErr error
+
+	userRepos    []string
+	userReposErr error
 
 	vars       map[string]string
 	secrets    []string
@@ -92,8 +100,16 @@ type setSecretCall struct {
 	keyID                        string
 }
 
+func (f *fakeBackend) GetOwnerType(_ context.Context, _ string) (gh.OwnerType, error) {
+	return f.ownerType, f.ownerTypeErr
+}
+
 func (f *fakeBackend) ListOrgRepos(_ context.Context, _ string) ([]string, error) {
 	return f.orgRepos, f.orgReposErr
+}
+
+func (f *fakeBackend) ListUserRepos(_ context.Context, _ string) ([]string, error) {
+	return f.userRepos, f.userReposErr
 }
 
 func (f *fakeBackend) ListRepoVariables(_ context.Context, _, _ string) (map[string]string, error) {
@@ -2663,5 +2679,145 @@ github.com:
 			t.Fatalf("repo %q stanza split (interleaved):\n%s", name, out.String())
 		}
 		seen[name] = true
+	}
+}
+
+// --- user-account (personal "org") support ---------------------------------
+
+func TestAudit_UserAccountUsesUserRepos(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `
+github.com:
+  wes:
+    all-repos:
+      managed:
+        vars:
+          ALL_VAR:
+            value: ok
+`)
+	// orgRepos is deliberately wrong: a user account must enumerate via
+	// userRepos, never the org endpoint.
+	be := &fakeBackend{
+		ownerType: gh.OwnerUser,
+		orgRepos:  []string{"should-not-be-used"},
+		userRepos: []string{"alpha", "beta"},
+		vars:      map[string]string{"ALL_VAR": "ok"},
+	}
+	var out bytes.Buffer
+	res, err := Audit(context.Background(), cfg, "wes", be, &out, false, OrgOptions{Verbose: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.OkRepos != 2 || res.FailedRepos != 0 {
+		t.Errorf("repo counts: ok=%d failed=%d (want ok=2 failed=0)", res.OkRepos, res.FailedRepos)
+	}
+	s := out.String()
+	for _, want := range []string{"repo: alpha", "repo: beta"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("output missing %q\n--\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "should-not-be-used") {
+		t.Errorf("user account must not enumerate org repos:\n%s", s)
+	}
+}
+
+func TestAudit_UserAccountSkipsOrgScope(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `
+github.com:
+  wes:
+    org:
+      managed:
+        vars:
+          ORG_VAR:
+            value: x
+    all-repos:
+      managed:
+        vars:
+          ALL_VAR:
+            value: ok
+`)
+	be := &fakeBackend{
+		ownerType: gh.OwnerUser,
+		userRepos: []string{"alpha"},
+		vars:      map[string]string{"ALL_VAR": "ok"},
+		// orgVars left nil: if org scope were (incorrectly) attempted it
+		// would still produce a stanza, which we assert is absent.
+	}
+	var out bytes.Buffer
+	res, err := Audit(context.Background(), cfg, "wes", be, &out, false, OrgOptions{Verbose: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "SKIPPED") || !strings.Contains(s, "user account") {
+		t.Errorf("expected a clear org-scope skip notice:\n%s", s)
+	}
+	if strings.Contains(s, "ORG_VAR") {
+		t.Errorf("org scope must not be audited for a user account:\n%s", s)
+	}
+	if !strings.Contains(s, "repo: alpha") {
+		t.Errorf("repo fan-out should still run for a user account:\n%s", s)
+	}
+	if res.FailedRepos != 0 {
+		t.Errorf("skipping org scope must not count as a failure: failed=%d", res.FailedRepos)
+	}
+}
+
+func TestApply_UserAccountSkipsOrgScope(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `
+github.com:
+  wes:
+    org:
+      managed:
+        vars:
+          ORG_VAR:
+            value: x
+`)
+	be := &fakeBackend{ownerType: gh.OwnerUser}
+	var out bytes.Buffer
+	if _, err := Apply(context.Background(), cfg, "wes", be, &out, OrgOptions{Verbose: true}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	be.mu.Lock()
+	defer be.mu.Unlock()
+	if len(be.setOrgVarCalls) != 0 {
+		t.Errorf("org-scope writes must not fire for a user account: %v", be.setOrgVarCalls)
+	}
+	if !strings.Contains(out.String(), "SKIPPED") {
+		t.Errorf("expected org-scope skip notice:\n%s", out.String())
+	}
+}
+
+func TestEnforce_UserAccountSkipsOrgScope(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `
+github.com:
+  wes:
+    org:
+      managed:
+        vars:
+          ORG_VAR:
+            value: x
+`)
+	be := &fakeBackend{ownerType: gh.OwnerUser}
+	var out bytes.Buffer
+	if _, err := Enforce(context.Background(), cfg, "wes", be, &out, EnforceOptions{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out.String(), "SKIPPED") {
+		t.Errorf("expected org-scope skip notice:\n%s", out.String())
+	}
+}
+
+func TestAudit_OwnerTypeError(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoadCfg(t, `github.com: {wes: {all-repos: {managed: {}}}}`)
+	be := &fakeBackend{ownerTypeErr: errors.New("rate limited")}
+	var out bytes.Buffer
+	if _, err := Audit(context.Background(), cfg, "wes", be, &out, false, OrgOptions{}); err == nil {
+		t.Fatal("expected error when owner-type lookup fails")
 	}
 }

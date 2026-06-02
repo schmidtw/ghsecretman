@@ -11,14 +11,39 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	gogithub "github.com/google/go-github/v85/github"
+)
+
+// OwnerType distinguishes a GitHub organization from a personal (user)
+// account. The two differ in how their repositories are enumerated and in
+// whether org-level secrets/variables exist at all: user accounts have no
+// org-level Actions, variable, or Dependabot API, so that scope is
+// unsupported for them.
+type OwnerType int
+
+const (
+	// OwnerOrg is a GitHub organization.
+	OwnerOrg OwnerType = iota
+	// OwnerUser is a personal GitHub account.
+	OwnerUser
 )
 
 // Backend is the interface the runner consumes; satisfied by *Client and
 // by test fakes.
 type Backend interface {
+	// GetOwnerType reports whether owner is a GitHub organization or a
+	// user account. The runner uses it to pick the repo-enumeration
+	// endpoint and to skip org-level scope for user accounts.
+	GetOwnerType(ctx context.Context, owner string) (OwnerType, error)
+
 	ListOrgRepos(ctx context.Context, org string) ([]string, error)
+
+	// ListUserRepos returns the names of every repository owned by the
+	// authenticated user that belongs to owner. Private repos are
+	// included. It is the user-account counterpart to ListOrgRepos.
+	ListUserRepos(ctx context.Context, owner string) ([]string, error)
 
 	ListRepoVariables(ctx context.Context, owner, repo string) (map[string]string, error)
 	ListRepoSecrets(ctx context.Context, owner, repo string) ([]string, error)
@@ -82,6 +107,51 @@ func NewClientFromEnv() (*Client, error) {
 // that need to point at httptest.
 func NewClientFromGoGithub(gh *gogithub.Client) *Client {
 	return &Client{gh: gh}
+}
+
+// GetOwnerType resolves whether owner is a GitHub organization or a user
+// account by reading the `type` field of the public account record. Any
+// type other than "User" (notably "Organization") is treated as an org.
+func (c *Client) GetOwnerType(ctx context.Context, owner string) (OwnerType, error) {
+	u, _, err := c.gh.Users.Get(ctx, owner)
+	if err != nil {
+		return OwnerOrg, fmt.Errorf("get owner %q: %w", owner, err)
+	}
+	if u != nil && strings.EqualFold(u.GetType(), "User") {
+		return OwnerUser, nil
+	}
+	return OwnerOrg, nil
+}
+
+// ListUserRepos returns the names of every repository owned by the
+// authenticated user whose owner login matches owner (case-insensitively,
+// as GitHub logins are). It pages through GET /user/repos with the `owner`
+// affiliation so private repos are included; the login filter drops repos
+// reachable through other affiliations. Managing a user account's secrets
+// requires authenticating as that user, so the authenticated-user endpoint
+// is the right source here.
+func (c *Client) ListUserRepos(ctx context.Context, owner string) ([]string, error) {
+	opts := &gogithub.RepositoryListByAuthenticatedUserOptions{
+		Affiliation: "owner",
+		ListOptions: gogithub.ListOptions{PerPage: 100},
+	}
+	var names []string
+	for {
+		repos, resp, err := c.gh.Repositories.ListByAuthenticatedUser(ctx, opts)
+		if err != nil {
+			return nil, fmt.Errorf("list user repos: %w", err)
+		}
+		for _, r := range repos {
+			if r != nil && r.Name != nil && strings.EqualFold(r.GetOwner().GetLogin(), owner) {
+				names = append(names, *r.Name)
+			}
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return names, nil
 }
 
 // ListOrgRepos returns the names of every repository in the org. Pages

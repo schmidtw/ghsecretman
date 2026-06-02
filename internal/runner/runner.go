@@ -447,17 +447,59 @@ type OrgResult struct {
 	FailedRepos int
 }
 
-// targetRepos returns the org repos this run will process and the count of
-// repos returned by ListOrgRepos that the config does not address.
-//
-// A repo is addressed when either an all-repos block exists or the org has
-// a per-repo entry for it. Unaddressed repos are skipped silently — there
-// is nothing to audit, apply, or enforce on them — but they are counted so
-// the summary line can report them.
-func targetRepos(ctx context.Context, backend gh.Backend, o *config.Org, org string) ([]string, int, error) {
-	all, err := backend.ListOrgRepos(ctx, org)
+// orgScopeUnsupportedNotice is written when an `org:` block is configured
+// for a user account. GitHub has no org-level secret/variable/Dependabot API
+// for user accounts, so the scope is skipped rather than attempted.
+const orgScopeUnsupportedNotice = "org: %s\nscope: org\n  SKIPPED: %q is a user account; GitHub has no org-level secret, variable, or Dependabot API for user accounts. Move these values into all-repos or per-repo.\n"
+
+// listOwnerRepos enumerates every repo under owner via the endpoint that
+// matches its type: ListOrgRepos for organizations, ListUserRepos for user
+// accounts.
+func listOwnerRepos(ctx context.Context, backend gh.Backend, owner string, ot gh.OwnerType) ([]string, error) {
+	if ot == gh.OwnerUser {
+		all, err := backend.ListUserRepos(ctx, owner)
+		if err != nil {
+			return nil, fmt.Errorf("list user repos: %w", err)
+		}
+		return all, nil
+	}
+	all, err := backend.ListOrgRepos(ctx, owner)
 	if err != nil {
-		return nil, 0, fmt.Errorf("list org repos: %w", err)
+		return nil, fmt.Errorf("list org repos: %w", err)
+	}
+	return all, nil
+}
+
+// resolveOwner determines whether owner is an org or a user account and
+// reports whether the org-level scope should run. When an `org:` block is
+// configured for a user account, it writes a clear skip notice to out and
+// returns runOrgScope=false; everything else (per-repo and all-repos
+// fan-out) is owner-agnostic and runs unchanged.
+func resolveOwner(ctx context.Context, backend gh.Backend, o *config.Org, owner string, out io.Writer) (gh.OwnerType, bool, error) {
+	ot, err := backend.GetOwnerType(ctx, owner)
+	if err != nil {
+		return ot, false, fmt.Errorf("determine owner type for %q: %w", owner, err)
+	}
+	if o.OrgScope != nil && ot == gh.OwnerUser {
+		fmt.Fprintf(out, orgScopeUnsupportedNotice, owner, owner)
+		return ot, false, nil
+	}
+	return ot, o.OrgScope != nil, nil
+}
+
+// targetRepos returns the repos this run will process and the count of repos
+// returned by the owner's repo listing that the config does not address.
+//
+// The listing endpoint depends on owner type: organizations enumerate via
+// ListOrgRepos, user accounts via ListUserRepos. A repo is addressed when
+// either an all-repos block exists or the org has a per-repo entry for it.
+// Unaddressed repos are skipped silently — there is nothing to audit, apply,
+// or enforce on them — but they are counted so the summary line can report
+// them.
+func targetRepos(ctx context.Context, backend gh.Backend, o *config.Org, owner string, ot gh.OwnerType) ([]string, int, error) {
+	all, err := listOwnerRepos(ctx, backend, owner, ot)
+	if err != nil {
+		return nil, 0, err
 	}
 	out := make([]string, 0, len(all))
 	skipped := 0
@@ -535,7 +577,11 @@ func Audit(ctx context.Context, cfg *config.Config, org string, backend gh.Backe
 		return OrgResult{}, fmt.Errorf("org %q not found in config", org)
 	}
 	res := OrgResult{}
-	if o.OrgScope != nil {
+	ot, runOrgScope, err := resolveOwner(ctx, backend, o, org, out)
+	if err != nil {
+		return OrgResult{}, err
+	}
+	if runOrgScope {
 		orgRes, err := AuditOrgScope(ctx, cfg, org, backend, out, showIgnored, opts.Verbose)
 		if err != nil {
 			fmt.Fprintf(out, "org: %s\nscope: org\n  ERROR: %v\n", org, err)
@@ -544,7 +590,7 @@ func Audit(ctx context.Context, cfg *config.Config, org string, backend gh.Backe
 			res.Drift = true
 		}
 	}
-	repos, skipped, err := targetRepos(ctx, backend, o, org)
+	repos, skipped, err := targetRepos(ctx, backend, o, org, ot)
 	if err != nil {
 		return OrgResult{}, err
 	}
@@ -577,7 +623,11 @@ func Apply(ctx context.Context, cfg *config.Config, org string, backend gh.Backe
 		return OrgResult{}, fmt.Errorf("org %q not found in config", org)
 	}
 	res := OrgResult{}
-	if o.OrgScope != nil {
+	ot, runOrgScope, err := resolveOwner(ctx, backend, o, org, out)
+	if err != nil {
+		return OrgResult{}, err
+	}
+	if runOrgScope {
 		orgRes, err := ApplyOrgScope(ctx, cfg, org, backend, out, opts.Verbose)
 		if err != nil {
 			fmt.Fprintf(out, "org: %s\nscope: org\n  ERROR: %v\n", org, err)
@@ -586,7 +636,7 @@ func Apply(ctx context.Context, cfg *config.Config, org string, backend gh.Backe
 			res.FailedEntries += orgRes.Failed
 		}
 	}
-	repos, skipped, err := targetRepos(ctx, backend, o, org)
+	repos, skipped, err := targetRepos(ctx, backend, o, org, ot)
 	if err != nil {
 		return OrgResult{}, err
 	}
@@ -609,7 +659,11 @@ func Enforce(ctx context.Context, cfg *config.Config, org string, backend gh.Bac
 		return OrgResult{}, fmt.Errorf("org %q not found in config", org)
 	}
 	res := OrgResult{}
-	if o.OrgScope != nil {
+	ot, runOrgScope, err := resolveOwner(ctx, backend, o, org, out)
+	if err != nil {
+		return OrgResult{}, err
+	}
+	if runOrgScope {
 		orgRes, err := EnforceOrgScope(ctx, cfg, org, backend, out, opts)
 		if err != nil {
 			fmt.Fprintf(out, "org: %s\nscope: org\n  ERROR: %v\n", org, err)
@@ -618,7 +672,7 @@ func Enforce(ctx context.Context, cfg *config.Config, org string, backend gh.Bac
 			res.FailedEntries += orgRes.Failed
 		}
 	}
-	repos, skipped, err := targetRepos(ctx, backend, o, org)
+	repos, skipped, err := targetRepos(ctx, backend, o, org, ot)
 	if err != nil {
 		return OrgResult{}, err
 	}
