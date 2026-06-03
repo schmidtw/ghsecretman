@@ -11,6 +11,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// YAML section and visibility keys recognized by the decoder.
+const (
+	keyManaged    = "managed"
+	keyVars       = "vars"
+	keySecrets    = "secrets"
+	keyDependabot = "dependabot"
+	keyRepos      = "repos"
+	visSelected   = "selected"
+)
+
 // Config is the parsed ghsecretman configuration.
 type Config struct {
 	BaseDir string
@@ -192,7 +202,7 @@ func decodeOrgScope(baseDir, orgName string, n *yaml.Node) (*OrgScope, error) {
 		key := n.Content[i].Value
 		val := n.Content[i+1]
 		switch key {
-		case "managed":
+		case keyManaged:
 			m, err := decodeOrgManaged(baseDir, orgName, val)
 			if err != nil {
 				return nil, err
@@ -220,9 +230,9 @@ func checkOrgManagedIgnoredConflict(orgName string, s *OrgScope) error {
 		managed map[string]*OrgEntry
 		ignored []string
 	}{
-		{"vars", s.Managed.Vars, s.Ignored.Vars},
-		{"secrets", s.Managed.Secrets, s.Ignored.Secrets},
-		{"dependabot", s.Managed.Dependabot, s.Ignored.Dependabot},
+		{keyVars, s.Managed.Vars, s.Ignored.Vars},
+		{keySecrets, s.Managed.Secrets, s.Ignored.Secrets},
+		{keyDependabot, s.Managed.Dependabot, s.Ignored.Dependabot},
 	}
 	for _, c := range conflicts {
 		for _, name := range c.ignored {
@@ -247,20 +257,20 @@ func decodeOrgManaged(baseDir, orgName string, n *yaml.Node) (OrgManaged, error)
 		key := n.Content[i].Value
 		val := n.Content[i+1]
 		switch key {
-		case "vars":
-			es, err := decodeOrgEntries(baseDir, orgName, "vars", val)
+		case keyVars:
+			es, err := decodeOrgEntries(baseDir, orgName, keyVars, val)
 			if err != nil {
 				return m, err
 			}
 			m.Vars = es
-		case "secrets":
-			es, err := decodeOrgEntries(baseDir, orgName, "secrets", val)
+		case keySecrets:
+			es, err := decodeOrgEntries(baseDir, orgName, keySecrets, val)
 			if err != nil {
 				return m, err
 			}
 			m.Secrets = es
-		case "dependabot":
-			es, err := decodeOrgEntries(baseDir, orgName, "dependabot", val)
+		case keyDependabot:
+			es, err := decodeOrgEntries(baseDir, orgName, keyDependabot, val)
 			if err != nil {
 				return m, err
 			}
@@ -317,7 +327,7 @@ func decodeOrgEntry(baseDir, orgName, section, name string, n *yaml.Node) (*OrgE
 		case "scope":
 			hasScope = true
 			oe.Visibility = v.Value
-		case "repos":
+		case keyRepos:
 			list, err := decodeStringList(fmt.Sprintf("org %q", orgName), "org.managed."+section+"."+name+".repos", v)
 			if err != nil {
 				return nil, err
@@ -344,12 +354,12 @@ func validateOrgVisibility(orgName, section, name string, oe *OrgEntry) error {
 	case "all", "private":
 		if len(oe.Repos) > 0 {
 			return fmt.Errorf("org %q: org.managed.%s.%s: repos may only be set when scope is %q",
-				orgName, section, name, "selected")
+				orgName, section, name, visSelected)
 		}
-	case "selected":
+	case visSelected:
 		if len(oe.Repos) == 0 {
 			return fmt.Errorf("org %q: org.managed.%s.%s: scope %q requires a non-empty repos list",
-				orgName, section, name, "selected")
+				orgName, section, name, visSelected)
 		}
 	default:
 		return fmt.Errorf("org %q: org.managed.%s.%s: scope must be one of all|private|selected (got %q)",
@@ -367,7 +377,7 @@ func decodeRepo(baseDir, repoName string, n *yaml.Node) (*Repo, error) {
 		key := n.Content[i].Value
 		val := n.Content[i+1]
 		switch key {
-		case "managed":
+		case keyManaged:
 			m, err := decodeManaged(baseDir, repoName, val)
 			if err != nil {
 				return nil, err
@@ -395,9 +405,9 @@ func checkManagedIgnoredConflict(repoName string, r *Repo) error {
 		managed map[string]*Entry
 		ignored []string
 	}{
-		{"vars", r.Managed.Vars, r.Ignored.Vars},
-		{"secrets", r.Managed.Secrets, r.Ignored.Secrets},
-		{"dependabot", r.Managed.Dependabot, r.Ignored.Dependabot},
+		{keyVars, r.Managed.Vars, r.Ignored.Vars},
+		{keySecrets, r.Managed.Secrets, r.Ignored.Secrets},
+		{keyDependabot, r.Managed.Dependabot, r.Ignored.Dependabot},
 	}
 	for _, c := range conflicts {
 		for _, name := range c.ignored {
@@ -422,20 +432,20 @@ func decodeManaged(baseDir, repoName string, n *yaml.Node) (Managed, error) {
 		key := n.Content[i].Value
 		val := n.Content[i+1]
 		switch key {
-		case "vars":
-			entries, err := decodeEntries(baseDir, repoName, "vars", val)
+		case keyVars:
+			entries, err := decodeEntries(baseDir, repoName, keyVars, val)
 			if err != nil {
 				return m, err
 			}
 			m.Vars = entries
-		case "secrets":
-			entries, err := decodeEntries(baseDir, repoName, "secrets", val)
+		case keySecrets:
+			entries, err := decodeEntries(baseDir, repoName, keySecrets, val)
 			if err != nil {
 				return m, err
 			}
 			m.Secrets = entries
-		case "dependabot":
-			entries, err := decodeEntries(baseDir, repoName, "dependabot", val)
+		case keyDependabot:
+			entries, err := decodeEntries(baseDir, repoName, keyDependabot, val)
 			if err != nil {
 				return m, err
 			}
@@ -528,11 +538,11 @@ func decodeIgnored(ctx string, n *yaml.Node) (Ignored, error) {
 			return ig, err
 		}
 		switch key {
-		case "vars":
+		case keyVars:
 			ig.Vars = list
-		case "secrets":
+		case keySecrets:
 			ig.Secrets = list
-		case "dependabot":
+		case keyDependabot:
 			ig.Dependabot = list
 		default:
 			return ig, fmt.Errorf("%s: ignored: unknown key %q", ctx, key)

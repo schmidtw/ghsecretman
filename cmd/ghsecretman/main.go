@@ -26,6 +26,15 @@ var (
 	date    = "unknown"
 )
 
+// Subcommand names, shared between dispatch, flag-set names, and messages.
+const (
+	cmdAudit   = "audit"
+	cmdApply   = "apply"
+	cmdEnforce = "enforce"
+	cmdExample = "example"
+	cmdVersion = "version"
+)
+
 // backendFactory is overridden in tests to inject a fake backend.
 var backendFactory = func() (gh.Backend, error) { return gh.NewClientFromEnv() }
 
@@ -36,15 +45,15 @@ func main() {
 func run(args []string, ver string, stdout, stderr io.Writer) int {
 	if len(args) >= 2 {
 		switch args[1] {
-		case "audit":
+		case cmdAudit:
 			return runAudit(args[2:], stdout, stderr)
-		case "apply":
+		case cmdApply:
 			return runApply(args[2:], stdout, stderr)
-		case "enforce":
+		case cmdEnforce:
 			return runEnforce(args[2:], stdout, stderr)
-		case "example":
+		case cmdExample:
 			return runExample(args[2:], stdout, stderr)
-		case "version":
+		case cmdVersion:
 			fmt.Fprintf(stdout, "ghsecretman %s\ncommit %s\nbuilt %s\n", ver, commit, date)
 			return 0
 		case "-h", "--help", "help":
@@ -55,7 +64,7 @@ func run(args []string, ver string, stdout, stderr io.Writer) int {
 
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	showVersion := fs.Bool("version", false, "print version and exit")
+	showVersion := fs.Bool(cmdVersion, false, "print version and exit")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -100,7 +109,7 @@ See 'ghsecretman example' for the full schema with annotations.
 // stdout, or writes it to a file when -o/--output is supplied. Existing files
 // are not overwritten unless -f/--force is set.
 func runExample(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("example", flag.ContinueOnError)
+	fs := flag.NewFlagSet(cmdExample, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var output string
 	fs.StringVar(&output, "output", "", "write to file instead of stdout")
@@ -134,7 +143,7 @@ func runExample(args []string, stdout, stderr io.Writer) int {
 }
 
 func runEnforce(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("enforce", flag.ContinueOnError)
+	fs := flag.NewFlagSet(cmdEnforce, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", "", "path to YAML config file")
 	org := fs.String("org", "", "GitHub organization name")
@@ -197,7 +206,7 @@ func runEnforceOrg(cfg *config.Config, org string, backend gh.Backend, opts runn
 }
 
 func runAudit(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
+	fs := flag.NewFlagSet(cmdAudit, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", "", "path to YAML config file")
 	org := fs.String("org", "", "GitHub organization name")
@@ -251,7 +260,7 @@ func runAudit(args []string, stdout, stderr io.Writer) int {
 }
 
 func runApply(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
+	fs := flag.NewFlagSet(cmdApply, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", "", "path to YAML config file")
 	org := fs.String("org", "", "GitHub organization name")
