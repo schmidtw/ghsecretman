@@ -106,7 +106,11 @@ func TestRun_NoArgs(t *testing.T) {
 }
 
 type fakeBackend struct {
-	orgRepos []string
+	// ownerType defaults to gh.OwnerOrg (zero value); userRepos is used
+	// when ownerType is gh.OwnerUser.
+	ownerType gh.OwnerType
+	orgRepos  []string
+	userRepos []string
 
 	vars       map[string]string
 	secrets    []string
@@ -136,8 +140,16 @@ type fakeBackend struct {
 	repoIDs map[string]int64
 }
 
+func (f *fakeBackend) GetOwnerType(_ context.Context, _ string) (gh.OwnerType, error) {
+	return f.ownerType, nil
+}
+
 func (f *fakeBackend) ListOrgRepos(_ context.Context, _ string) ([]string, error) {
 	return f.orgRepos, nil
+}
+
+func (f *fakeBackend) ListUserRepos(_ context.Context, _ string) ([]string, error) {
+	return f.userRepos, nil
 }
 
 func (f *fakeBackend) ListRepoVariables(_ context.Context, _, _ string) (map[string]string, error) {

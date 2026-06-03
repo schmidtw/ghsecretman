@@ -56,6 +56,8 @@ The full YAML schema (`org`, `per-repo`, `all-repos`, `managed`, `ignored`, valu
 
 Top-level keys other than `github.com:` are ignored, so the same file can carry sections owned by other tools.
 
+**Personal accounts work like orgs — with one exception.** Pass a personal (user) account name to `--org` and ghsecretman auto-detects that it is a user account and enumerates that user's repositories (including private ones) instead of using the organization endpoint. All repo-scoped behavior — `per-repo`, `all-repos` fan-out, `audit`/`apply`/`enforce`, and single-`--repo` runs — works exactly as it does for an organization. The one thing that cannot work is the `org:` (org-level scope) block: GitHub has no org-level Actions secret, variable, or Dependabot API for user accounts. When an `org:` block is present for a user account, ghsecretman prints a clear `SKIPPED` notice and continues with the repo-level work. Move any org-level values into `all-repos` (to fan them out to every repo) or `per-repo`.
+
 **Repo iteration is opt-in.** ghsecretman only enumerates an org's repositories when the YAML has either an `all-repos:` block or a `per-repo:` block for that repo. Without either, repo-level secrets/variables are invisible to the tool. If you only intend to manage org-level objects but also want existing repo-level cruft cleaned up, include an empty `all-repos:` block (empty `managed` maps and empty `ignored` lists). With nothing under `managed`, every existing repo-level entry is reported as `extra` by `audit` and deleted by `enforce`. Run `ghsecretman enforce --dry-run` first to confirm the list before letting deletes fire.
 
 ## License

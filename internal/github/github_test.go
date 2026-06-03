@@ -92,6 +92,112 @@ func TestClient_ListOrgRepos_Error(t *testing.T) {
 	}
 }
 
+func TestClient_GetOwnerType(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		apiType string
+		want    OwnerType
+	}{
+		{"User", OwnerUser},
+		{"Organization", OwnerOrg},
+		{"Bot", OwnerOrg}, // anything other than User is treated as org
+	}
+	for _, tc := range tests {
+		t.Run(tc.apiType, func(t *testing.T) {
+			t.Parallel()
+			srv, c := newTestClient(t, map[string]string{
+				"/users/example": `{"login":"example","type":"` + tc.apiType + `"}`,
+			})
+			defer srv.Close()
+			got, err := c.GetOwnerType(context.Background(), "example")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClient_GetOwnerType_Error(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"not found"}`, http.StatusNotFound)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+	if _, err := c.GetOwnerType(context.Background(), "missing"); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestClient_ListUserRepos(t *testing.T) {
+	t.Parallel()
+	// The owner login is matched case-insensitively, private repos are
+	// kept, and repos owned by someone else (reachable via other
+	// affiliations) are dropped.
+	srv, c := newTestClient(t, map[string]string{
+		"/user/repos": `[
+			{"name":"alpha","private":false,"owner":{"login":"Example"}},
+			{"name":"beta","private":true,"owner":{"login":"example"}},
+			{"name":"gamma","owner":{"login":"someone-else"}}
+		]`,
+	})
+	defer srv.Close()
+
+	got, err := c.ListUserRepos(context.Background(), "example")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	sort.Strings(got)
+	want := []string{"alpha", "beta"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("got %v want %v", got, want)
+	}
+}
+
+func TestClient_ListUserRepos_Pagination(t *testing.T) {
+	t.Parallel()
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("page") {
+		case "", "1":
+			w.Header().Set("Link", `<`+srvURL+r.URL.Path+`?page=2>; rel="next"`)
+			fmt.Fprint(w, `[{"name":"alpha","owner":{"login":"example"}}]`)
+		case "2":
+			fmt.Fprint(w, `[{"name":"beta","owner":{"login":"example"}}]`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	srvURL = srv.URL
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+
+	got, err := c.ListUserRepos(context.Background(), "example")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	sort.Strings(got)
+	if strings.Join(got, ",") != "alpha,beta" {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestClient_ListUserRepos_Error(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"nope"}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+	c := newClientPointingAt(t, srv.URL)
+	if _, err := c.ListUserRepos(context.Background(), "example"); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 func TestClient_ListRepoVariables(t *testing.T) {
 	t.Parallel()
 	srv, c := newTestClient(t, map[string]string{

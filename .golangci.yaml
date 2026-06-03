@@ -35,6 +35,7 @@ linters:
       - linters:
           - dupl
           - funlen
+          - goconst
         path: _test.go
       - linters:
           - unused
