@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/google/go-github/v85 v85.0.0
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	golang.org/x/sync v0.20.0
 	gopkg.in/yaml.v3 v3.0.1
 )
